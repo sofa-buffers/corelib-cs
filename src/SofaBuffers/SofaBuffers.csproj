@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <AssemblyName>SofaBuffers</AssemblyName>
+    <RootNamespace>SofaBuffers</RootNamespace>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+
+    <!-- NuGet packaging metadata (org.sofabuffers parity). -->
+    <PackageId>SofaBuffers</PackageId>
+    <Version>0.1.0</Version>
+    <Authors>SofaBuffers</Authors>
+    <Description>Dependency-free, allocation-light, streaming C# implementation of the SofaBuffers (Sofab) serialization format.</Description>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+  </PropertyGroup>
+
+</Project>

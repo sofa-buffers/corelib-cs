@@ -1,0 +1,20 @@
+# Local secrets — never commit these.
+.env
+.devcontainer/.env
+
+# .NET build output
+bin/
+obj/
+
+# Test / coverage output
+[Tt]est[Rr]esults/
+*.trx
+coverage/
+coverage.json
+coverage.cobertura.xml
+lcov.info
+
+# Rider / VS
+.idea/
+.vs/
+*.user

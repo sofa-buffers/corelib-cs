@@ -1,0 +1,107 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  DOTNET_CLI_TELEMETRY_OPTOUT: 1
+  DOTNET_NOLOGO: 1
+
+jobs:
+  build-test:
+    name: Build & test (.NET ${{ matrix.dotnet }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Current LTS plus the SDK the devcontainer ships.
+        dotnet: ['9.0.x']
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up .NET ${{ matrix.dotnet }}
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ matrix.dotnet }}
+
+      - name: Restore
+        run: dotnet restore SofaBuffers.sln
+
+      - name: Build
+        run: dotnet build SofaBuffers.sln --no-restore -c Release
+
+      - name: Test
+        run: dotnet test SofaBuffers.sln --no-build -c Release --verbosity normal
+
+  coverage:
+    name: Coverage
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # to push the badge JSON to the `badges` branch
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '9.0.x'
+
+      # Runs the xUnit suite and produces a Cobertura report (coverlet.collector),
+      # scoped to the SofaBuffers library via coverlet.runsettings.
+      - name: Test with coverage
+        run: >
+          dotnet test SofaBuffers.sln
+          --collect:"XPlat Code Coverage"
+          --settings coverlet.runsettings
+          --results-directory ./coverage-raw
+
+      - name: Compute coverage percentages
+        run: |
+          COB=$(find ./coverage-raw -name 'coverage.cobertura.xml' | head -n1)
+          echo "report: $COB"
+          LINE_RATE=$(grep -o 'line-rate="[0-9.]*"' "$COB" | head -n1 | grep -o '[0-9.]*')
+          BRANCH_RATE=$(grep -o 'branch-rate="[0-9.]*"' "$COB" | head -n1 | grep -o '[0-9.]*')
+          LINE_PCT=$(awk "BEGIN { printf \"%.1f\", ${LINE_RATE:-0} * 100 }")
+          BRANCH_PCT=$(awk "BEGIN { printf \"%.1f\", ${BRANCH_RATE:-0} * 100 }")
+          printf 'line coverage:   %s%%\n' "$LINE_PCT"
+          printf 'branch coverage: %s%%\n' "$BRANCH_PCT"
+          echo "LINE_PCT=$LINE_PCT" >> "$GITHUB_ENV"
+          echo "BRANCH_PCT=$BRANCH_PCT" >> "$GITHUB_ENV"
+
+      # Publish Shields.io endpoint badges driven by the real CI coverage
+      # numbers. The JSON lives on an orphan `badges` branch so it never
+      # clutters main; the README points Shields at its raw URL.
+      - name: Publish coverage badges
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          color() {
+            local pct_int
+            pct_int=$(printf '%.0f' "$1")
+            if   [ "$pct_int" -ge 90 ]; then echo brightgreen
+            elif [ "$pct_int" -ge 75 ]; then echo green
+            elif [ "$pct_int" -ge 60 ]; then echo yellowgreen
+            elif [ "$pct_int" -ge 40 ]; then echo orange
+            else echo red; fi
+          }
+          mkdir badge-out && cd badge-out
+          printf '{"schemaVersion":1,"label":"coverage","message":"%s%%","color":"%s"}\n' \
+            "$LINE_PCT" "$(color "$LINE_PCT")" > coverage.json
+          printf '{"schemaVersion":1,"label":"branches","message":"%s%%","color":"%s"}\n' \
+            "$BRANCH_PCT" "$(color "$BRANCH_PCT")" > branches.json
+          git init -q
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -q -b badges
+          git add coverage.json branches.json
+          git commit -q -m "chore: update coverage badges (line ${LINE_PCT}%, branch ${BRANCH_PCT}%)"
+          git push -f "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" badges
