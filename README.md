@@ -14,8 +14,7 @@
 [![Branches](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Fsofa-buffers%2Fcorelib-cs%2Fbadges%2Fbranches.json)](https://github.com/sofa-buffers/corelib-cs/actions/workflows/ci.yml)
 [![Docs](https://img.shields.io/badge/docs-API-blue)](https://sofa-buffers.github.io/corelib-cs/)
 
-[GitHub repository](https://github.com/sofa-buffers/corelib-cs) ·
-[API documentation](https://sofa-buffers.github.io/corelib-cs/)
+[GitHub repository](https://github.com/sofa-buffers/corelib-cs)
 
 A **dependency-free**, **allocation-light**, **streaming** C# implementation of
 the SofaBuffers (*Sofab*) serialization format. It is the **runtime stream core**
@@ -49,6 +48,18 @@ NuGet package id: `SofaBuffers` · namespace `SofaBuffers`. Targets .NET 9 (`net
 | Reserve-offset | `new OStream(buf, offset)` leaves room at the front of the buffer for a lower-layer protocol header (saves a copy). |
 | Explicit endianness | IEEE-754 values are written / read little-endian with explicit bit shifts, so behaviour is identical on every runtime. |
 | Generated-code friendly | `IVisitor` has a default no-op for every field kind (a C# default-interface method), so generated (and hand-written) sinks override only what they need and ignore the rest. |
+
+## Source documentation
+
+[Documentation](https://sofa-buffers.github.io/corelib-cs/) — DocFX HTML for the
+`SofaBuffers` namespace, generated from the XML doc comments and published to
+GitHub Pages on every push to `main`. Build / preview it locally:
+
+```bash
+dotnet tool install -g docfx        # one-time
+docfx docs/docfx.json               # output under docs/_site
+docfx docs/docfx.json --serve       # build and serve at http://localhost:8080
+```
 
 ## Usage
 
@@ -165,24 +176,6 @@ The managed .NET runtime exposes no portable hardware cycle counter, so — like
 the Java tool — `perf` reports `cycles/op` as unavailable and uses **CPU time/op**
 (process CPU time, clock-independent) as the code-cost proxy, alongside the
 machine-dependent MB/s figure.
-
-## Documentation
-
-The full API reference is generated from the XML doc comments with
-[DocFX](https://dotnet.github.io/docfx/) and published to GitHub Pages:
-
-**<https://sofa-buffers.github.io/corelib-cs/>**
-
-Build / preview it locally:
-
-```bash
-dotnet tool install -g docfx        # one-time
-docfx docs/docfx.json               # output under docs/_site
-docfx docs/docfx.json --serve       # build and serve at http://localhost:8080
-```
-
-The [`Docs` workflow](.github/workflows/docs.yml) rebuilds and deploys the site on
-every push to `main` (the C# analogue of the C/C++ repo's Doxygen workflow).
 
 ## Testing & coverage
 
