@@ -14,10 +14,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Global dotnet tools — best-practice C# toolchain
+#   dotnet-format / csharpier        : formatting
+#   dotnet-outdated-tool             : dependency update checks
+#   docfx                            : API documentation site (docs/docfx.json)
+#   dotnet-reportgenerator-globaltool: HTML coverage report (coverage.sh)
 RUN dotnet tool install -g dotnet-format \
     && dotnet tool install -g dotnet-outdated-tool \
-    && dotnet tool install -g dotnet-ef \
-    && dotnet tool install -g csharpier
+    && dotnet tool install -g csharpier \
+    && dotnet tool install -g docfx \
+    && dotnet tool install -g dotnet-reportgenerator-globaltool
 
 # Node.js (LTS) for Claude Code
 RUN curl -fsSL https://deb.nodesource.com/setup_lts.x | bash - \
