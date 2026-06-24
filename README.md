@@ -12,8 +12,10 @@
 [![CI](https://github.com/sofa-buffers/corelib-cs/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/sofa-buffers/corelib-cs/actions/workflows/ci.yml)
 [![Coverage](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Fsofa-buffers%2Fcorelib-cs%2Fbadges%2Fcoverage.json)](https://github.com/sofa-buffers/corelib-cs/actions/workflows/ci.yml)
 [![Branches](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Fsofa-buffers%2Fcorelib-cs%2Fbadges%2Fbranches.json)](https://github.com/sofa-buffers/corelib-cs/actions/workflows/ci.yml)
+[![Docs](https://img.shields.io/badge/docs-API-blue)](https://sofa-buffers.github.io/corelib-cs/)
 
-[GitHub repository](https://github.com/sofa-buffers/corelib-cs)
+[GitHub repository](https://github.com/sofa-buffers/corelib-cs) ·
+[API documentation](https://sofa-buffers.github.io/corelib-cs/)
 
 A **dependency-free**, **allocation-light**, **streaming** C# implementation of
 the SofaBuffers (*Sofab*) serialization format. It is the **runtime stream core**
@@ -163,6 +165,24 @@ The managed .NET runtime exposes no portable hardware cycle counter, so — like
 the Java tool — `perf` reports `cycles/op` as unavailable and uses **CPU time/op**
 (process CPU time, clock-independent) as the code-cost proxy, alongside the
 machine-dependent MB/s figure.
+
+## Documentation
+
+The full API reference is generated from the XML doc comments with
+[DocFX](https://dotnet.github.io/docfx/) and published to GitHub Pages:
+
+**<https://sofa-buffers.github.io/corelib-cs/>**
+
+Build / preview it locally:
+
+```bash
+dotnet tool install -g docfx        # one-time
+docfx docs/docfx.json               # output under docs/_site
+docfx docs/docfx.json --serve       # build and serve at http://localhost:8080
+```
+
+The [`Docs` workflow](.github/workflows/docs.yml) rebuilds and deploys the site on
+every push to `main` (the C# analogue of the C/C++ repo's Doxygen workflow).
 
 ## Testing & coverage
 

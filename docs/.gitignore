@@ -1,0 +1,6 @@
+# DocFX generated output.
+_site/
+
+# DocFX-generated API metadata (regenerated from the source on every build).
+api/*.yml
+api/.manifest
