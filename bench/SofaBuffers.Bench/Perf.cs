@@ -11,7 +11,9 @@
  *      The managed .NET runtime exposes no portable cycle counter (no RDTSC
  *      intrinsic), so this line reports that it is unavailable, exactly as the
  *      Java tool does and as the C/Rust tools do off-arch. CPU time/op below is
- *      the runtime-independent proxy for code cost.
+ *      the runtime-independent proxy for code cost. For a fully CPU-speed-
+ *      independent figure, run the single-shot Callgrind workloads instead
+ *      (see Callgrind.cs / `SofaBuffers.Bench <workload>`).
  *   2. throughput MB/s + CPU time/op -- a "speedtest" for this machine, derived
  *      from process CPU time (not wall-clock), the .NET equivalent of the C
  *      tool's clock(). MB = 1e6 bytes.

@@ -9,10 +9,15 @@
  *   dotnet run -c Release --project bench/SofaBuffers.Bench -- perf
  *   dotnet run -c Release --project bench/SofaBuffers.Bench -- bench
  *
+ * A single-shot Callgrind workload (CPU-speed-independent instruction counting,
+ * ARCHITECTURE.md §10.1) is selected by naming the workload directly:
+ *   dotnet run -c Release --project bench/SofaBuffers.Bench -- encode_u64_array
+ *
  * SPDX-License-Identifier: MIT
  */
 
 using System;
+using System.Linq;
 
 namespace SofaBuffers.Bench;
 
@@ -21,6 +26,13 @@ internal static class Program
     private static int Main(string[] args)
     {
         string which = args.Length > 0 ? args[0].ToLowerInvariant() : "perf";
+
+        // Single-shot named workloads for Callgrind instruction counting.
+        if (Callgrind.Workloads.Contains(which))
+        {
+            return Callgrind.Run(which);
+        }
+
         switch (which)
         {
             case "perf":
@@ -35,7 +47,8 @@ internal static class Program
                 Bench.Run();
                 return 0;
             default:
-                Console.Error.WriteLine("usage: SofaBuffers.Bench [perf|bench|all]");
+                Console.Error.WriteLine("usage: SofaBuffers.Bench [perf|bench|all|<workload>]");
+                Console.Error.WriteLine("  workloads (single-shot, for Callgrind): " + string.Join(", ", Callgrind.Workloads));
                 return 2;
         }
     }
