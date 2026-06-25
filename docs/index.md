@@ -12,14 +12,14 @@ single `switch` over the field id.
 
 ## Where to start
 
-- **[API reference](xref:SofaBuffers)** — every public type, generated from the XML doc comments.
-- <xref:SofaBuffers.OStream> — the streaming encoder.
-- <xref:SofaBuffers.IStream> + <xref:SofaBuffers.IVisitor> — the streaming decoder and its visitor.
+- **[API reference](xref:sofab)** — every public type, generated from the XML doc comments.
+- <xref:sofab.OStream> — the streaming encoder.
+- <xref:sofab.IStream> + <xref:sofab.IVisitor> — the streaming decoder and its visitor.
 
 ## Quick example
 
 ```csharp
-using SofaBuffers;
+using sofab;
 
 // encode
 byte[] buf = new byte[64];

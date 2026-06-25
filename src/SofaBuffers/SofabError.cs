@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: MIT
  */
 
-namespace SofaBuffers;
+namespace sofab;
 
 /// <summary>
 /// Error categories raised by the encoder and decoder.

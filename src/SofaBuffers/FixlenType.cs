@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: MIT
  */
 
-namespace SofaBuffers;
+namespace sofab;
 
 /// <summary>
 /// Sub-type of a fixed-length field — the 3-bit tag encoded in the low bits of a

@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: MIT
  */
 
-namespace SofaBuffers;
+namespace sofab;
 
 /// <summary>
 /// Element category of an array field, reported to an <see cref="IVisitor"/> via

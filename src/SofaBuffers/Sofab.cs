@@ -4,15 +4,15 @@
  * SPDX-License-Identifier: MIT
  */
 
-namespace SofaBuffers;
+namespace sofab;
 
 /// <summary>
 /// Library-level constants for the SofaBuffers (<c>sofab</c>) core.
 /// </summary>
 /// <remarks>
-/// The architecture spec fixes the namespace name as <c>sofab</c>; this type
-/// carries that name so the API version and other shared constants are reachable
-/// as <c>SofaBuffers.Sofab.*</c>.
+/// Public symbols live under the <c>sofab</c> namespace (per the architecture
+/// spec); this type collects library-level constants such as the API version,
+/// reachable as <c>sofab.Sofab.*</c>.
 /// </remarks>
 public static class Sofab
 {

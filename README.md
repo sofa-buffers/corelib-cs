@@ -35,7 +35,8 @@ unit tests here use the exact byte vectors from the
 (`test/c/test_ostream.c`) to guarantee byte-for-byte interoperability with the C,
 C++, Rust, Java and Go implementations.
 
-NuGet package id: `SofaBuffers` · namespace `SofaBuffers`. Targets .NET 9 (`net9.0`).
+NuGet package id: `SofaBuffers` · namespace `sofab` (fixed by the format spec, as
+in the C++ `namespace sofab`). Targets .NET 9 (`net9.0`).
 
 ## Why this design
 
@@ -52,7 +53,7 @@ NuGet package id: `SofaBuffers` · namespace `SofaBuffers`. Targets .NET 9 (`net
 ## Source documentation
 
 [Documentation](https://sofa-buffers.github.io/corelib-cs/) — DocFX HTML for the
-`SofaBuffers` namespace, generated from the XML doc comments and published to
+`sofab` namespace, generated from the XML doc comments and published to
 GitHub Pages on every push to `main`. Build / preview it locally:
 
 ```bash
@@ -64,7 +65,7 @@ docfx docs/docfx.json --serve       # build and serve at http://localhost:8080
 ## Usage
 
 ```csharp
-using SofaBuffers;
+using sofab;
 
 // ---- encode (fixed buffer, no per-write allocation) ----
 byte[] buf = new byte[64];
@@ -96,7 +97,7 @@ the specific cause is available via `SofabException.Error`.
 
 ```csharp
 using System.IO;
-using SofaBuffers;
+using sofab;
 
 byte[] scratch = new byte[16];                 // tiny buffer
 using var outStream = new MemoryStream();      // or a socket / file
