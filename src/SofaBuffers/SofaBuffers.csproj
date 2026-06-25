@@ -6,7 +6,9 @@
     <Nullable>enable</Nullable>
     <LangVersion>latest</LangVersion>
     <AssemblyName>SofaBuffers</AssemblyName>
-    <RootNamespace>SofaBuffers</RootNamespace>
+    <!-- Public symbols live under the `sofab` namespace (architecture spec §6),
+         while the assembly/package keep the SofaBuffers branding. -->
+    <RootNamespace>sofab</RootNamespace>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
 

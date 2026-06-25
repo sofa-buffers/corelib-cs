@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: MIT
  */
 
-namespace SofaBuffers;
+namespace sofab;
 
 /// <summary>
 /// Receives decoded fields pushed by an <see cref="IStream"/>.

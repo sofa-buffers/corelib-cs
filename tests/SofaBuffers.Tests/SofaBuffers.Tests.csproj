@@ -20,4 +20,10 @@
     <ProjectReference Include="../../src/SofaBuffers/SofaBuffers.csproj" />
   </ItemGroup>
 
+  <!-- The shared, language-agnostic conformance suite (single source of truth
+       in assets/, copied verbatim from the documentation repo). -->
+  <ItemGroup>
+    <None Include="../../assets/test_vectors.json" Link="test_vectors.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
 </Project>

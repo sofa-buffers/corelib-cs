@@ -35,7 +35,8 @@ unit tests here use the exact byte vectors from the
 (`test/c/test_ostream.c`) to guarantee byte-for-byte interoperability with the C,
 C++, Rust, Java and Go implementations.
 
-NuGet package id: `SofaBuffers` · namespace `SofaBuffers`. Targets .NET 9 (`net9.0`).
+NuGet package id: `SofaBuffers` · namespace `sofab` (fixed by the format spec, as
+in the C++ `namespace sofab`). Targets .NET 9 (`net9.0`).
 
 ## Why this design
 
@@ -52,7 +53,7 @@ NuGet package id: `SofaBuffers` · namespace `SofaBuffers`. Targets .NET 9 (`net
 ## Source documentation
 
 [Documentation](https://sofa-buffers.github.io/corelib-cs/) — DocFX HTML for the
-`SofaBuffers` namespace, generated from the XML doc comments and published to
+`sofab` namespace, generated from the XML doc comments and published to
 GitHub Pages on every push to `main`. Build / preview it locally:
 
 ```bash
@@ -64,7 +65,7 @@ docfx docs/docfx.json --serve       # build and serve at http://localhost:8080
 ## Usage
 
 ```csharp
-using SofaBuffers;
+using sofab;
 
 // ---- encode (fixed buffer, no per-write allocation) ----
 byte[] buf = new byte[64];
@@ -96,7 +97,7 @@ the specific cause is available via `SofabException.Error`.
 
 ```csharp
 using System.IO;
-using SofaBuffers;
+using sofab;
 
 byte[] scratch = new byte[16];                 // tiny buffer
 using var outStream = new MemoryStream();      // or a socket / file
@@ -125,6 +126,25 @@ class BlobSink : IVisitor
 }
 new IStream().Feed(buf, 0, used, new BlobSink());
 ```
+
+## API summary
+
+**`OStream`** (encoder) — `WriteUnsigned`, `WriteSigned`, `WriteBoolean`,
+`WriteFp32`, `WriteFp64`, `WriteString`, `WriteBlob`, `WriteFixlen`;
+`WriteArrayUnsigned` / `WriteArraySigned` (overloaded for 8/16/32/64-bit element
+types), `WriteArrayFp32`, `WriteArrayFp64`; `WriteSequenceBegin` /
+`WriteSequenceEnd`; `Flush`, `BufferSet`, `BytesUsed`.
+
+**`IStream`** (decoder) — `Feed(data[, off, len], visitor)`, fed in arbitrarily
+small chunks.
+
+**`IVisitor`** (decoder sink, every method a default no-op) — `Unsigned`,
+`Signed`, `Fp32`, `Fp64`, `String`, `Blob`, `ArrayBegin`, `SequenceBegin`,
+`SequenceEnd`. Override only what you need; unhandled fields are skipped.
+
+**Supporting types** — `FixlenType`, `ArrayKind`, `SofabError`,
+`SofabException` (`: IOException`), `FlushSink` (delegate), and
+`Sofab.ApiVersion` (`== 1`).
 
 ## Format coverage
 
@@ -177,6 +197,18 @@ the Java tool — `perf` reports `cycles/op` as unavailable and uses **CPU time/
 (process CPU time, clock-independent) as the code-cost proxy, alongside the
 machine-dependent MB/s figure.
 
+For a fully CPU-speed-independent number, name a workload directly to run it
+**once** under a profiler (Callgrind instruction counting, the spec's second
+acceptable technique for runtimes without a cycle counter):
+
+```bash
+# one encode of the 1000-element u64 array, setup excluded:
+valgrind --tool=callgrind --collect-atstart=no \
+  --toggle-collect='*Callgrind.OpEncodeU64Array*' \
+  dotnet bench/SofaBuffers.Bench/bin/Release/net9.0/SofaBuffers.Bench.dll encode_u64_array
+# workloads: encode_u64_array, decode_u64_array, encode_typical, decode_typical
+```
+
 ## Testing & coverage
 
 ```bash
@@ -186,6 +218,10 @@ dotnet test SofaBuffers.sln                 # unit + integration tests
 
 Tests live in `tests/SofaBuffers.Tests/` as focused suites:
 
+- `TestVectorsConformanceTests.cs` — the shared, language-agnostic conformance
+  suite (`assets/test_vectors.json`, copied verbatim from the documentation
+  repo): every vector replayed for encode (byte-exact), decode (field match) and
+  byte-at-a-time chunked decode
 - `OStreamTests.cs` — encoder, byte-exact vs. the C reference vectors
 - `IStreamTests.cs` — decoder over the same vectors + malformed-input errors + byte-at-a-time feeding
 - `DecoderErrorsTests.cs` — every malformed-input rejection branch

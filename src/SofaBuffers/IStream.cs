@@ -6,9 +6,9 @@
 
 using System;
 
-using static SofaBuffers.WireFormat;
+using static sofab.WireFormat;
 
-namespace SofaBuffers;
+namespace sofab;
 
 /// <summary>
 /// Streaming SofaBuffers decoder.

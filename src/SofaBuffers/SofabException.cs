@@ -6,7 +6,7 @@
 
 using System.IO;
 
-namespace SofaBuffers;
+namespace sofab;
 
 /// <summary>
 /// Thrown by the encoder and decoder on protocol or buffer errors.

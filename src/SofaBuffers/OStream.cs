@@ -7,9 +7,9 @@
 using System;
 using System.Text;
 
-using static SofaBuffers.WireFormat;
+using static sofab.WireFormat;
 
-namespace SofaBuffers;
+namespace sofab;
 
 /// <summary>
 /// Streaming SofaBuffers encoder writing into a caller-provided byte buffer.
