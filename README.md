@@ -1,9 +1,9 @@
-<p align="center"><img src="assets/sofabuffers_logo.png" alt="SofaBuffers Logo" height="140"></p>
+<p align="center"><img src="assets/sofabuffers_logo.png" alt="SofaBuffers" height="140"></p>
 
 # SofaBuffers
 
-<b>Structured Objects For Anyone</b><br>
-<i>... so optimized, feels amazing.</i>
+**Structured Objects For Anyone** \
+*... so optimized, feels amazing.*
 
 [Would you like to know more?](https://github.com/sofa-buffers)
 
@@ -49,18 +49,6 @@ in the C++ `namespace sofab`). Targets .NET 9 (`net9.0`).
 | Reserve-offset | `new OStream(buf, offset)` leaves room at the front of the buffer for a lower-layer protocol header (saves a copy). |
 | Explicit endianness | IEEE-754 values are written / read little-endian with explicit bit shifts, so behaviour is identical on every runtime. |
 | Generated-code friendly | `IVisitor` has a default no-op for every field kind (a C# default-interface method), so generated (and hand-written) sinks override only what they need and ignore the rest. |
-
-## Source documentation
-
-[Documentation](https://sofa-buffers.github.io/corelib-cs/) — DocFX HTML for the
-`sofab` namespace, generated from the XML doc comments and published to
-GitHub Pages on every push to `main`. Build / preview it locally:
-
-```bash
-dotnet tool install -g docfx        # one-time
-docfx docs/docfx.json               # output under docs/_site
-docfx docs/docfx.json --serve       # build and serve at http://localhost:8080
-```
 
 ## Usage
 
@@ -146,15 +134,22 @@ small chunks.
 `SofabException` (`: IOException`), `FlushSink` (delegate), and
 `Sofab.ApiVersion` (`== 1`).
 
-## Format coverage
+## Feature flags
 
-The C# build always includes the full format — unsigned / signed varints,
-`fp32` / `fp64`, strings, blobs, arrays and nested sequences — because the
-desktop and cloud targets it is built for are not code-size constrained. The C
-library's compile-time `SOFAB_DISABLE_*` switches (which strip whole code paths
-for tiny microcontrollers) therefore have no C# equivalent. The value type is
-64-bit (`ulong` / `long`), matching the C default configuration so the wire image
-and varint lengths are identical.
+Unlike the C library's compile-time `SOFAB_DISABLE_*` switches (which strip whole
+code paths for tiny microcontrollers), the C# build always ships the **full**
+format — there are no build toggles, because the desktop and cloud targets it is
+built for are not code-size constrained.
+
+| Feature | State |
+|---------|-------|
+| `fixlen` (fp32 / fp64, string, blob) | always on |
+| `array` (unsigned / signed / fixlen arrays) | always on |
+| `sequence` (nested scopes) | always on |
+| `fp64` | always on |
+
+The scalar value type is 64-bit (`ulong` / `long`), matching the C default
+configuration so the wire image and varint lengths are identical.
 
 ## Layering vs. the C library
 
@@ -170,10 +165,31 @@ and varint lengths are identical.
 ```bash
 dotnet build SofaBuffers.sln -c Release     # build the library, tests and benchmarks
 dotnet test  SofaBuffers.sln                # run the xUnit suite
+./coverage.sh                               # coverlet: Cobertura + terminal summary (+ HTML if ReportGenerator is installed)
 ```
 
 Requires the .NET SDK 9. The `.devcontainer/` here builds a ready-to-use image
 (`./.devcontainer/start.sh`) with the SDK and tooling preinstalled.
+
+Tests live in `tests/SofaBuffers.Tests/` as focused suites:
+
+- `TestVectorsConformanceTests.cs` — the shared, language-agnostic conformance
+  suite (`assets/test_vectors.json`, copied verbatim from the documentation
+  repo): every vector replayed for encode (byte-exact), decode (field match) and
+  byte-at-a-time chunked decode
+- `OStreamTests.cs` — encoder, byte-exact vs. the C reference vectors
+- `IStreamTests.cs` — decoder over the same vectors + malformed-input errors + byte-at-a-time feeding
+- `DecoderErrorsTests.cs` — every malformed-input rejection branch
+- `EncoderOverloadsTests.cs` — every `OStream` writer overload + argument validation
+- `RoundTripTests.cs` — encode → decode value preservation (scalars, arrays, strings/blobs, sequences)
+- `ApiTests.cs` — offset reserve, flush-sink streaming larger than the buffer, chunked decode
+- `StreamingEdgeTests.cs` — empty string/blob fields, multi-byte array counts
+- `VisitorDefaultsTests.cs` — a no-op `IVisitor` silently drops every field kind
+- `Common/RecordingVisitor.cs` — shared recording `IVisitor`
+
+Current coverage: **~98% lines / ~94% branches** (coverlet, library only).
+The CI workflow ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) builds,
+tests and measures coverage, then publishes the badge JSON consumed above.
 
 ## Benchmarks
 
@@ -209,29 +225,3 @@ valgrind --tool=callgrind --collect-atstart=no \
 # workloads: encode_u64_array, decode_u64_array, encode_typical, decode_typical
 ```
 
-## Testing & coverage
-
-```bash
-dotnet test SofaBuffers.sln                 # unit + integration tests
-./coverage.sh                               # coverlet: Cobertura + terminal summary (+ HTML if ReportGenerator is installed)
-```
-
-Tests live in `tests/SofaBuffers.Tests/` as focused suites:
-
-- `TestVectorsConformanceTests.cs` — the shared, language-agnostic conformance
-  suite (`assets/test_vectors.json`, copied verbatim from the documentation
-  repo): every vector replayed for encode (byte-exact), decode (field match) and
-  byte-at-a-time chunked decode
-- `OStreamTests.cs` — encoder, byte-exact vs. the C reference vectors
-- `IStreamTests.cs` — decoder over the same vectors + malformed-input errors + byte-at-a-time feeding
-- `DecoderErrorsTests.cs` — every malformed-input rejection branch
-- `EncoderOverloadsTests.cs` — every `OStream` writer overload + argument validation
-- `RoundTripTests.cs` — encode → decode value preservation (scalars, arrays, strings/blobs, sequences)
-- `ApiTests.cs` — offset reserve, flush-sink streaming larger than the buffer, chunked decode
-- `StreamingEdgeTests.cs` — empty string/blob fields, multi-byte array counts
-- `VisitorDefaultsTests.cs` — a no-op `IVisitor` silently drops every field kind
-- `Common/RecordingVisitor.cs` — shared recording `IVisitor`
-
-Current coverage: **~98% lines / ~94% branches** (coverlet, library only).
-The CI workflow ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) builds,
-tests and measures coverage, then publishes the badge JSON consumed above.
