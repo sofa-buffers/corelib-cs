@@ -5,6 +5,7 @@
  */
 
 using System;
+using System.Runtime.CompilerServices;
 
 using static sofab.WireFormat;
 
@@ -144,9 +145,374 @@ public sealed class IStream
                 continue;
             }
 
+            // Fast path: at a clean field boundary (no partial varint or
+            // mid-array element carried over from a previous Feed) advance an
+            // index straight over the contiguous buffer, decoding whole fields
+            // -- and whole arrays -- inline. This skips the per-byte state-
+            // machine dispatch that dominates decode cost. We only fall back to
+            // the byte-at-a-time machine for the tail of a field that is split
+            // across a Feed boundary.
+            if (_state == State.Idle && _varintShift == 0 && !_inArray)
+            {
+                int consumed = FastField(data, i, endExclusive, visitor);
+                if (consumed > 0)
+                {
+                    i += consumed;
+                    continue;
+                }
+                // consumed == 0: the field is not fully present in this chunk.
+                // Fall through to the byte machine, which accumulates the
+                // partial header/value and resumes on the next Feed.
+            }
+
             Step(data[i] & 0xFF, visitor);
             i++;
         }
+    }
+
+    /// <summary>
+    /// Decode one complete top-level field (or one complete array) starting at
+    /// <paramref name="start"/>, advancing over the contiguous buffer.
+    /// </summary>
+    /// <returns>
+    /// The number of bytes consumed (&gt; 0) when a whole field was decoded; or
+    /// <c>0</c> when the field is not fully present in <c>[start, end)</c>, in
+    /// which case no visitor callback was emitted and no decoder state was
+    /// mutated (so the byte-at-a-time machine can re-parse from <paramref name="start"/>).
+    /// An array whose elements are only partially present commits the elements
+    /// that did fit and leaves the decoder in the correct mid-array state.
+    /// </returns>
+    private int FastField(byte[] data, int start, int end, IVisitor visitor)
+    {
+        int n = ReadVarint(data, start, end, out ulong header);
+        if (n == 0)
+        {
+            return 0;
+        }
+        int p = start + n;
+
+        int wireType = (int)(header & 0x07);
+        ulong idValue = header >> 3;
+        if (idValue > (ulong)ID_MAX)
+        {
+            throw new SofabException(SofabError.InvalidMessage, "id " + idValue);
+        }
+        int id = (int)idValue;
+
+        switch (wireType)
+        {
+            case T_VARINT_UNSIGNED:
+            {
+                int m = ReadVarint(data, p, end, out ulong value);
+                if (m == 0)
+                {
+                    return 0;
+                }
+                visitor.Unsigned(id, value);
+                return p + m - start;
+            }
+            case T_VARINT_SIGNED:
+            {
+                int m = ReadVarint(data, p, end, out ulong value);
+                if (m == 0)
+                {
+                    return 0;
+                }
+                visitor.Signed(id, ZigzagDecode(value));
+                return p + m - start;
+            }
+            case T_FIXLEN:
+                return FastFixlen(data, start, p, end, id, visitor);
+            case T_VARINTARRAY_UNSIGNED:
+                return FastVarintArray(data, start, p, end, id, ArrayKind.Unsigned, signed: false, visitor);
+            case T_VARINTARRAY_SIGNED:
+                return FastVarintArray(data, start, p, end, id, ArrayKind.Signed, signed: true, visitor);
+            case T_FIXLENARRAY:
+                return FastFixlenArray(data, start, p, end, id, visitor);
+            case T_SEQUENCE_START:
+                if (_depth == ulong.MaxValue)
+                {
+                    throw new SofabException(SofabError.InvalidMessage, "sequence too deep");
+                }
+                _depth++;
+                visitor.SequenceBegin(id);
+                return p - start;
+            case T_SEQUENCE_END:
+                if (_depth == 0)
+                {
+                    throw new SofabException(SofabError.InvalidMessage, "dangling sequence end");
+                }
+                _depth--;
+                visitor.SequenceEnd();
+                return p - start;
+            default:
+                throw new SofabException(SofabError.InvalidMessage, "field type " + wireType);
+        }
+    }
+
+    /// <summary>Fast-path decode of a single fixlen field (fp32/fp64/string/blob).</summary>
+    private int FastFixlen(byte[] data, int start, int p, int end, int id, IVisitor visitor)
+    {
+        int n = ReadVarint(data, p, end, out ulong lenHeader);
+        if (n == 0)
+        {
+            return 0;
+        }
+        p += n;
+
+        FixlenType subtype = FixlenTypeExtensions.FromRaw((int)(lenHeader & 0x07));
+        ulong lengthValue = lenHeader >> 3;
+        if (lengthValue > ARRAY_MAX)
+        {
+            throw new SofabException(SofabError.InvalidMessage, "fixlen length " + lengthValue);
+        }
+        int length = (int)lengthValue;
+
+        switch (subtype)
+        {
+            case FixlenType.Fp32:
+                if (length != 4)
+                {
+                    throw new SofabException(SofabError.InvalidMessage, "fp32 length " + length);
+                }
+                if (end - p < 4)
+                {
+                    return 0;
+                }
+                visitor.Fp32(id, BitConverter.Int32BitsToSingle(ReadInt32Le(data, p)));
+                return p + 4 - start;
+            case FixlenType.Fp64:
+                if (length != 8)
+                {
+                    throw new SofabException(SofabError.InvalidMessage, "fp64 length " + length);
+                }
+                if (end - p < 8)
+                {
+                    return 0;
+                }
+                visitor.Fp64(id, BitConverter.Int64BitsToDouble(ReadInt64Le(data, p)));
+                return p + 8 - start;
+            case FixlenType.String:
+            case FixlenType.Blob:
+                if (length == 0)
+                {
+                    if (subtype == FixlenType.String)
+                    {
+                        visitor.String(id, 0, 0, _acc, 0, 0);
+                    }
+                    else
+                    {
+                        visitor.Blob(id, 0, 0, _acc, 0, 0);
+                    }
+                    return p - start;
+                }
+                // Deliver the whole payload in one chunk only if it is fully
+                // present; otherwise defer to the byte machine's chunked
+                // FixlenRaw path (handles split-across-feeds streaming).
+                if (end - p < length)
+                {
+                    return 0;
+                }
+                if (subtype == FixlenType.String)
+                {
+                    visitor.String(id, length, 0, data, p, length);
+                }
+                else
+                {
+                    visitor.Blob(id, length, 0, data, p, length);
+                }
+                return p + length - start;
+            default:
+                throw new SofabException(SofabError.InvalidMessage, "fixlen type");
+        }
+    }
+
+    /// <summary>Fast-path decode of a whole varint array (unsigned or signed).</summary>
+    private int FastVarintArray(byte[] data, int start, int p, int end, int id, ArrayKind kind, bool signed, IVisitor visitor)
+    {
+        int n = ReadVarint(data, p, end, out ulong count);
+        if (n == 0)
+        {
+            return 0; // count varint not complete; re-parse from header later
+        }
+        if (count == 0 || count > ARRAY_MAX)
+        {
+            throw new SofabException(SofabError.InvalidMessage, "array count");
+        }
+        p += n;
+        int remaining = (int)count;
+        visitor.ArrayBegin(id, kind, remaining);
+
+        while (remaining > 0)
+        {
+            int m = ReadVarint(data, p, end, out ulong value);
+            if (m == 0)
+            {
+                // This element is split across the Feed boundary. Commit the
+                // elements decoded so far and hand the rest to the byte machine.
+                _id = id;
+                _inArray = true;
+                _arrayKind = kind;
+                _arrayRemaining = remaining;
+                _state = signed ? State.VarintSigned : State.VarintUnsigned;
+                return p - start;
+            }
+            if (signed)
+            {
+                visitor.Signed(id, ZigzagDecode(value));
+            }
+            else
+            {
+                visitor.Unsigned(id, value);
+            }
+            p += m;
+            remaining--;
+        }
+        return p - start;
+    }
+
+    /// <summary>Fast-path decode of a whole fixlen array (fp32 / fp64 elements).</summary>
+    /// <remarks>
+    /// The type+length header is encoded once, for the first element; the
+    /// remaining elements are raw payloads of that same size (mirrors the byte
+    /// machine, which stays in <c>FixlenVal</c> between elements).
+    /// </remarks>
+    private int FastFixlenArray(byte[] data, int start, int p, int end, int id, IVisitor visitor)
+    {
+        int n = ReadVarint(data, p, end, out ulong count);
+        if (n == 0)
+        {
+            return 0;
+        }
+        if (count == 0 || count > ARRAY_MAX)
+        {
+            throw new SofabException(SofabError.InvalidMessage, "array count");
+        }
+        p += n;
+        int remaining = (int)count;
+        visitor.ArrayBegin(id, ArrayKind.Fixlen, remaining);
+
+        // Single type+length header for the whole array.
+        int hn = ReadVarint(data, p, end, out ulong lenHeader);
+        if (hn == 0)
+        {
+            // Header split across the Feed boundary: resume reading it in the
+            // byte machine's FixlenLen state.
+            _id = id;
+            _inArray = true;
+            _arrayKind = ArrayKind.Fixlen;
+            _arrayRemaining = remaining;
+            _accLen = 0;
+            _state = State.FixlenLen;
+            return p - start;
+        }
+
+        FixlenType subtype = FixlenTypeExtensions.FromRaw((int)(lenHeader & 0x07));
+        ulong lengthValue = lenHeader >> 3;
+        if (lengthValue > ARRAY_MAX)
+        {
+            throw new SofabException(SofabError.InvalidMessage, "fixlen length " + lengthValue);
+        }
+        int length = (int)lengthValue;
+
+        int need;
+        if (subtype == FixlenType.Fp32)
+        {
+            if (length != 4)
+            {
+                throw new SofabException(SofabError.InvalidMessage, "fp32 length " + length);
+            }
+            need = 4;
+        }
+        else if (subtype == FixlenType.Fp64)
+        {
+            if (length != 8)
+            {
+                throw new SofabException(SofabError.InvalidMessage, "fp64 length " + length);
+            }
+            need = 8;
+        }
+        else
+        {
+            // String/blob are not valid as fixlen-array elements.
+            throw new SofabException(SofabError.InvalidMessage, "dynamic fixlen array element");
+        }
+        p += hn;
+
+        while (remaining > 0)
+        {
+            if (end - p < need)
+            {
+                // Payload split across the Feed boundary: resume reading this
+                // element in the byte machine's FixlenVal state.
+                _id = id;
+                _inArray = true;
+                _arrayKind = ArrayKind.Fixlen;
+                _arrayRemaining = remaining;
+                _fixlenType = subtype;
+                _fixlenTotal = need;
+                _fixlenRemaining = need;
+                _accLen = 0;
+                _state = State.FixlenVal;
+                return p - start;
+            }
+            if (need == 4)
+            {
+                visitor.Fp32(id, BitConverter.Int32BitsToSingle(ReadInt32Le(data, p)));
+            }
+            else
+            {
+                visitor.Fp64(id, BitConverter.Int64BitsToDouble(ReadInt64Le(data, p)));
+            }
+            p += need;
+            remaining--;
+        }
+        return p - start;
+    }
+
+    /// <summary>
+    /// Read a base-128 varint from <c>data[pos..end)</c>.
+    /// </summary>
+    /// <returns>
+    /// The number of bytes consumed (&gt; 0) with the value in <paramref name="value"/>;
+    /// or <c>0</c> if the varint is not fully present in the buffer.
+    /// </returns>
+    /// <exception cref="SofabException">on varint overflow (&gt; <see cref="VALUE_BITS"/> bits).</exception>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static int ReadVarint(byte[] data, int pos, int end, out ulong value)
+    {
+        ulong v = 0;
+        int shift = 0;
+        int p = pos;
+        while (p < end)
+        {
+            int b = data[p++] & 0xFF;
+            v |= ((ulong)(b & 0x7F)) << shift;
+            shift += 7;
+            if ((b & 0x80) == 0)
+            {
+                value = v;
+                return p - pos;
+            }
+            if (shift >= VALUE_BITS)
+            {
+                throw new SofabException(SofabError.InvalidMessage, "varint overflow");
+            }
+        }
+        value = 0;
+        return 0;
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static int ReadInt32Le(byte[] d, int p) =>
+        (d[p] & 0xFF) | ((d[p + 1] & 0xFF) << 8) | ((d[p + 2] & 0xFF) << 16) | ((d[p + 3] & 0xFF) << 24);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static long ReadInt64Le(byte[] d, int p)
+    {
+        long lo = (uint)ReadInt32Le(d, p);
+        long hi = (uint)ReadInt32Le(d, p + 4);
+        return lo | (hi << 32);
     }
 
     private void Step(int b, IVisitor visitor)
