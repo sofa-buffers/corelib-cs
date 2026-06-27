@@ -9,6 +9,11 @@
  *   1. encode      -- replay fields at the given offset; bytes must equal serialized.hex
  *   2. decode      -- feed serialized.hex; decoded fields must match fields[]
  *   3. decode 1-by-1 -- feed one byte at a time; result must match the whole-feed decode
+ *   4. skip-ids    -- for vectors carrying a top-level "skip_ids": a receiver that
+ *                     ignores those ids (auto-skipping the field for any wire type,
+ *                     and the whole sub-sequence at any depth when the id names a
+ *                     sequence) must still decode the remaining fields and fully
+ *                     consume the message.
  *
  * SPDX-License-Identifier: MIT
  */
@@ -34,6 +39,12 @@ public class TestVectorsConformanceTests
         public int Offset;
         public JsonElement[] Fields = Array.Empty<JsonElement>();
         public byte[] Expected = Array.Empty<byte>();
+
+        /// <summary>
+        /// Field ids a receiver is expected to skip during decoding, or
+        /// <c>null</c> when the vector does not drive the skip-ids scenario.
+        /// </summary>
+        public int[]? SkipIds;
     }
 
     private static readonly Dictionary<string, Vector> Vectors = Load();
@@ -52,6 +63,9 @@ public class TestVectorsConformanceTests
                 // Clone so the elements outlive the JsonDocument.
                 Fields = v.GetProperty("fields").EnumerateArray().Select(f => f.Clone()).ToArray(),
                 Expected = Convert.FromHexString(v.GetProperty("serialized").GetProperty("hex").GetString()!),
+                SkipIds = v.TryGetProperty("skip_ids", out JsonElement skip)
+                    ? skip.EnumerateArray().Select(e => e.GetInt32()).ToArray()
+                    : null,
             };
             map[vec.Name] = vec;
         }
@@ -60,6 +74,10 @@ public class TestVectorsConformanceTests
 
     /// <summary>One xUnit case per vector, keyed by name.</summary>
     public static IEnumerable<object[]> VectorNames => Vectors.Keys.Select(n => new object[] { n });
+
+    /// <summary>One xUnit case per vector that carries a <c>skip_ids</c> array.</summary>
+    public static IEnumerable<object[]> SkipVectorNames =>
+        Vectors.Values.Where(v => v.SkipIds != null).Select(v => new object[] { v.Name });
 
     // --- helpers ------------------------------------------------------------
 
@@ -221,7 +239,141 @@ public class TestVectorsConformanceTests
         }
     }
 
-    // --- the three tests ----------------------------------------------------
+    // --- skip-ids scenario --------------------------------------------------
+
+    /// <summary>
+    /// A <see cref="TokenVisitor"/> that auto-skips fields whose id is in
+    /// <c>skipIds</c>: it drops a scalar/array/string of any wire type, and the
+    /// entire sub-sequence (at any nesting depth) when the id names a sequence.
+    /// This models a receiver that simply ignores optional fields it does not
+    /// care about, the visitor-pattern equivalent of the C API's "don't bind a
+    /// destination" skip.
+    /// </summary>
+    private sealed class SkippingTokenVisitor : IVisitor
+    {
+        public readonly List<string> Tokens = new();
+        private readonly HashSet<int> _skip;
+        private readonly MemoryStream _pending = new();
+        private string? _kind;
+        private int _id;
+        private int _total;
+
+        // Sequence nesting depth, and the depth of the skipped sequence whose
+        // sub-tree we are currently dropping (-1 when not skipping a sub-tree).
+        private int _depth;
+        private int _skipStartDepth = -1;
+
+        public SkippingTokenVisitor(IEnumerable<int> skipIds) => _skip = new HashSet<int>(skipIds);
+
+        private bool Skipping => _skipStartDepth >= 0;
+
+        public void Unsigned(int id, ulong v) { if (!Drop(id)) Tokens.Add($"u:{id}={v}"); }
+        public void Signed(int id, long v) { if (!Drop(id)) Tokens.Add($"s:{id}={v}"); }
+        public void Fp32(int id, float v) { if (!Drop(id)) Tokens.Add($"f32:{id}={BitConverter.SingleToInt32Bits(v)}"); }
+        public void Fp64(int id, double v) { if (!Drop(id)) Tokens.Add($"f64:{id}={BitConverter.DoubleToInt64Bits(v)}"); }
+        public void String(int id, int total, int offset, byte[] d, int o, int l) { if (!Drop(id)) Chunk("str", id, total, d, o, l); }
+        public void Blob(int id, int total, int offset, byte[] d, int o, int l) { if (!Drop(id)) Chunk("blob", id, total, d, o, l); }
+        public void ArrayBegin(int id, ArrayKind kind, int count) { if (!Drop(id)) Tokens.Add($"arr:{id}:{kind}:{count}"); }
+
+        public void SequenceBegin(int id)
+        {
+            if (Skipping)
+            {
+                _depth++; // still inside a dropped sub-tree
+                return;
+            }
+            if (_skip.Contains(id))
+            {
+                _skipStartDepth = _depth; // begin dropping this whole sub-tree
+                _depth++;
+                return;
+            }
+            Tokens.Add($"seq{{:{id}");
+            _depth++;
+        }
+
+        public void SequenceEnd()
+        {
+            _depth--;
+            if (Skipping)
+            {
+                if (_depth == _skipStartDepth)
+                {
+                    _skipStartDepth = -1; // closed the dropped sub-tree
+                }
+                return;
+            }
+            Tokens.Add("seq}");
+        }
+
+        /// <summary>True if the current field/element must be dropped.</summary>
+        private bool Drop(int id) => Skipping || _skip.Contains(id);
+
+        private void Chunk(string kind, int id, int total, byte[] d, int o, int l)
+        {
+            if (_kind == null)
+            {
+                _kind = kind;
+                _id = id;
+                _total = total;
+                _pending.SetLength(0);
+            }
+            _pending.Write(d, o, l);
+            if (_pending.Length >= _total)
+            {
+                Tokens.Add($"{_kind}:{_id}={Hex(_pending.ToArray())}");
+                _kind = null;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Builds the expected token stream from the vector's fields[] with the same
+    /// skip rules applied, so it can be compared against a
+    /// <see cref="SkippingTokenVisitor"/> decode.
+    /// </summary>
+    private static List<string> ExpectedTokensSkipping(JsonElement[] fields, int[] skipIds)
+    {
+        var skip = new HashSet<int>(skipIds);
+        var t = new List<string>();
+        int depth = 0;
+        int skipStartDepth = -1;
+        bool Skipping() => skipStartDepth >= 0;
+
+        foreach (JsonElement f in fields)
+        {
+            string op = f.GetProperty("op").GetString()!;
+            if (op == "sequence_begin")
+            {
+                int id = Id(f);
+                if (Skipping()) { depth++; continue; }
+                if (skip.Contains(id)) { skipStartDepth = depth; depth++; continue; }
+                t.Add($"seq{{:{id}");
+                depth++;
+                continue;
+            }
+            if (op == "sequence_end")
+            {
+                depth--;
+                if (Skipping())
+                {
+                    if (depth == skipStartDepth) skipStartDepth = -1;
+                    continue;
+                }
+                t.Add("seq}");
+                continue;
+            }
+
+            // A value-bearing field (scalar / float / string / blob / array).
+            if (Skipping()) continue;
+            int fid = f.TryGetProperty("id", out JsonElement idEl) ? idEl.GetInt32() : 0;
+            if (skip.Contains(fid)) continue;
+            ExpectedTokens(new[] { f }).ForEach(t.Add);
+        }
+        return t;
+    }
+
+    // --- the four tests -----------------------------------------------------
 
     [Theory]
     [MemberData(nameof(VectorNames))]
@@ -265,5 +417,21 @@ public class TestVectorsConformanceTests
         }
 
         Assert.Equal(whole.Tokens, oneByOne.Tokens);
+    }
+
+    [Theory]
+    [MemberData(nameof(SkipVectorNames))]
+    public void DecodeSkippingIdsMatchesVector(string name)
+    {
+        Vector v = Vectors[name];
+        Assert.NotNull(v.SkipIds);
+
+        // A receiver that ignores the skip_ids must still decode the remaining
+        // fields and fully consume the message (Feed throws on any malformed or
+        // truncated structure, so reaching the assert means full consumption).
+        var visitor = new SkippingTokenVisitor(v.SkipIds!);
+        new IStream().Feed(v.Expected, visitor);
+
+        Assert.Equal(ExpectedTokensSkipping(v.Fields, v.SkipIds!), visitor.Tokens);
     }
 }
