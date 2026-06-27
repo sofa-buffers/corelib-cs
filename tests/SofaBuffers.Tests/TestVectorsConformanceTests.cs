@@ -6,14 +6,21 @@
  * required by the SofaBuffers architecture spec (ARCHITECTURE.md §7). Each
  * vector is exercised three ways:
  *
- *   1. encode      -- replay fields at the given offset; bytes must equal serialized.hex
- *   2. decode      -- feed serialized.hex; decoded fields must match fields[]
- *   3. decode 1-by-1 -- feed one byte at a time; result must match the whole-feed decode
- *   4. skip-ids    -- for vectors carrying a top-level "skip_ids": a receiver that
- *                     ignores those ids (auto-skipping the field for any wire type,
- *                     and the whole sub-sequence at any depth when the id names a
- *                     sequence) must still decode the remaining fields and fully
- *                     consume the message.
+ *   1. encode         -- replay fields at the given offset; bytes must equal serialized.hex
+ *   2. chunked-encode -- encode through 1/3/7-byte buffers + a flush sink; the
+ *                        streamed-out bytes must still equal serialized.hex
+ *   3. decode         -- feed serialized.hex; decoded fields must match fields[]
+ *   4. decode 1-by-1  -- feed one byte at a time; result must match the whole-feed decode
+ *   5. roundtrip      -- encode then decode; recovered fields must match fields[]
+ *   6. skip-ids       -- for vectors carrying a top-level "skip_ids": a receiver that
+ *                        ignores those ids (auto-skipping the field for any wire type,
+ *                        and the whole sub-sequence at any depth when the id names a
+ *                        sequence) must still decode the remaining fields and fully
+ *                        consume the message.
+ *
+ * A vector's optional "requires" array names capability tags it needs (fixlen,
+ * array, sequence, fp64, int64). This full-wire-format implementation supports
+ * them all and runs every vector; a feature-reduced build would skip the rest.
  *
  * SPDX-License-Identifier: MIT
  */
@@ -45,7 +52,25 @@ public class TestVectorsConformanceTests
         /// <c>null</c> when the vector does not drive the skip-ids scenario.
         /// </summary>
         public int[]? SkipIds;
+
+        /// <summary>
+        /// Capability tags the vector demands (<c>fixlen</c>, <c>array</c>,
+        /// <c>sequence</c>, <c>fp64</c>, <c>int64</c>). A feature-reduced build
+        /// would skip vectors needing a disabled capability; this full-wire-format
+        /// implementation supports them all, so every vector runs.
+        /// </summary>
+        public string[] Requires = Array.Empty<string>();
     }
+
+    /// <summary>
+    /// Capabilities this implementation provides. SofaBuffers C# supports the
+    /// full wire format, so it satisfies every <c>requires</c> tag and runs every
+    /// vector (per the test-vectors spec, full implementations ignore
+    /// <c>requires</c>). Kept explicit so a future feature-reduced build can gate
+    /// vectors honestly.
+    /// </summary>
+    private static readonly HashSet<string> Supported =
+        new() { "fixlen", "array", "sequence", "fp64", "int64" };
 
     private static readonly Dictionary<string, Vector> Vectors = Load();
 
@@ -66,6 +91,9 @@ public class TestVectorsConformanceTests
                 SkipIds = v.TryGetProperty("skip_ids", out JsonElement skip)
                     ? skip.EnumerateArray().Select(e => e.GetInt32()).ToArray()
                     : null,
+                Requires = v.TryGetProperty("requires", out JsonElement req)
+                    ? req.EnumerateArray().Select(e => e.GetString()!).ToArray()
+                    : Array.Empty<string>(),
             };
             map[vec.Name] = vec;
         }
@@ -373,13 +401,21 @@ public class TestVectorsConformanceTests
         return t;
     }
 
-    // --- the four tests -----------------------------------------------------
+    // --- the six scenarios --------------------------------------------------
+
+    /// <summary>
+    /// True if this implementation provides every capability the vector requires.
+    /// Always true here (full wire-format support); kept so a feature-reduced
+    /// build can skip incompatible vectors instead of failing them.
+    /// </summary>
+    private static bool Runnable(Vector v) => v.Requires.All(Supported.Contains);
 
     [Theory]
     [MemberData(nameof(VectorNames))]
     public void EncodeMatchesVector(string name)
     {
         Vector v = Vectors[name];
+        if (!Runnable(v)) return;
         var buf = new byte[v.Expected.Length + v.Offset + 16];
         var os = new OStream(buf, v.Offset);
         ReplayEncode(os, v.Fields);
@@ -392,9 +428,52 @@ public class TestVectorsConformanceTests
 
     [Theory]
     [MemberData(nameof(VectorNames))]
+    public void ChunkedEncodeMatchesVector(string name)
+    {
+        Vector v = Vectors[name];
+        if (!Runnable(v)) return;
+
+        // Encode through deliberately tiny output buffers so the buffer-full
+        // flush path (PushByte / PushRaw spilling to the FlushSink mid-field)
+        // is exercised at every boundary. The streamed-out bytes must still
+        // reassemble to exactly serialized.hex.
+        foreach (int chunk in new[] { 1, 3, 7 })
+        {
+            var produced = new MemoryStream();
+            var os = new OStream(new byte[chunk], 0, (d, o, l) => produced.Write(d, o, l));
+            ReplayEncode(os, v.Fields);
+            os.Flush();
+            Assert.Equal(v.Expected, produced.ToArray());
+        }
+    }
+
+    [Theory]
+    [MemberData(nameof(VectorNames))]
+    public void RoundTripMatchesVector(string name)
+    {
+        Vector v = Vectors[name];
+        if (!Runnable(v)) return;
+
+        // Encode fresh, then decode what we produced: the recovered fields must
+        // match the vector's structure -- an end-to-end check independent of the
+        // serialized.hex ground truth.
+        var buf = new byte[v.Expected.Length + 16];
+        var os = new OStream(buf);
+        ReplayEncode(os, v.Fields);
+        var produced = new byte[os.BytesUsed];
+        Array.Copy(buf, produced, os.BytesUsed);
+
+        var visitor = new TokenVisitor();
+        new IStream().Feed(produced, visitor);
+        Assert.Equal(ExpectedTokens(v.Fields), visitor.Tokens);
+    }
+
+    [Theory]
+    [MemberData(nameof(VectorNames))]
     public void DecodeMatchesVector(string name)
     {
         Vector v = Vectors[name];
+        if (!Runnable(v)) return;
         var visitor = new TokenVisitor();
         new IStream().Feed(v.Expected, visitor);
         Assert.Equal(ExpectedTokens(v.Fields), visitor.Tokens);
@@ -405,6 +484,7 @@ public class TestVectorsConformanceTests
     public void DecodeByteByByteMatchesWhole(string name)
     {
         Vector v = Vectors[name];
+        if (!Runnable(v)) return;
 
         var whole = new TokenVisitor();
         new IStream().Feed(v.Expected, whole);
@@ -424,6 +504,7 @@ public class TestVectorsConformanceTests
     public void DecodeSkippingIdsMatchesVector(string name)
     {
         Vector v = Vectors[name];
+        if (!Runnable(v)) return;
         Assert.NotNull(v.SkipIds);
 
         // A receiver that ignores the skip_ids must still decode the remaining
