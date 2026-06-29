@@ -117,21 +117,128 @@ new IStream().Feed(buf, 0, used, new BlobSink());
 
 ## API summary
 
-**`OStream`** (encoder) — `WriteUnsigned`, `WriteSigned`, `WriteBoolean`,
-`WriteFp32`, `WriteFp64`, `WriteString`, `WriteBlob`, `WriteFixlen`;
-`WriteArrayUnsigned` / `WriteArraySigned` (overloaded for 8/16/32/64-bit element
-types), `WriteArrayFp32`, `WriteArrayFp64`; `WriteSequenceBegin` /
-`WriteSequenceEnd`; `Flush`, `BufferSet`, `BytesUsed`.
+### Write operations (`OStream`, encoder)
 
-**`IStream`** (decoder) — `Feed(data[, off, len], visitor)`, fed in arbitrarily
-small chunks.
+| Method | Writes |
+|--------|--------|
+| `WriteUnsigned(int id, ulong value)` | unsigned varint field |
+| `WriteSigned(int id, long value)` | signed (ZigZag) varint field |
+| `WriteBoolean(int id, bool value)` | unsigned `0` / `1` |
+| `WriteFp32(int id, float value)` | 32-bit IEEE-754 float (little-endian) |
+| `WriteFp64(int id, double value)` | 64-bit IEEE-754 double (little-endian) |
+| `WriteString(int id, string text)` | UTF-8 string field (no NUL on the wire) |
+| `WriteBlob(int id, byte[] data)` / `WriteBlob(int id, byte[] data, int from, int length)` | raw-byte blob field (whole array or a slice) |
+| `WriteFixlen(int id, byte[] data, int from, int length, FixlenType subtype)` | low-level fixlen field (the primitive the float / string / blob writers build on) |
+| `WriteArrayUnsigned(int id, …)` | unsigned array — overloaded for `byte[]`, `ushort[]`, `uint[]`, `ulong[]` (u8/u16/u32/u64) |
+| `WriteArraySigned(int id, …)` | signed array — overloaded for `sbyte[]`, `short[]`, `int[]`, `long[]` (i8/i16/i32/i64) |
+| `WriteArrayFp32(int id, float[] data)` / `WriteArrayFp64(int id, double[] data)` | fixlen (float) array |
+| `WriteSequenceBegin(int id)` / `WriteSequenceEnd()` | open / close a nested id scope |
+| `Flush()` → `int` | push pending bytes to the sink; returns the count that was pending |
+| `BufferSet(byte[] buffer, int offset)` | swap in a new caller buffer (typically from inside a flush sink) |
+| `BytesUsed` → `int` | bytes written to the active buffer since the last flush |
 
-**`IVisitor`** (decoder sink, every method a default no-op) — `Unsigned`,
-`Signed`, `Fp32`, `Fp64`, `String`, `Blob`, `ArrayBegin`, `SequenceBegin`,
-`SequenceEnd`. Override only what you need; unhandled fields are skipped.
+### Read operations (`IStream` + `IVisitor`, decoder)
 
-**Supporting types** — `FixlenType`, `ArrayKind`, `SofabError`,
-`SofabException` (`: IOException`), `FlushSink` (delegate), and
+The decoder is **pull on the wire, push to the caller**: you `Feed` bytes and the
+`IStream` calls back into your `IVisitor` once per decoded value. There is no
+per-field "read into this destination" call and no explicit `Skip` — a visitor
+simply leaves a callback at its default no-op to ignore (skip) that field kind.
+
+**`IStream`** — `Feed(byte[] data, IVisitor visitor)` and
+`Feed(byte[] data, int off, int len, IVisitor visitor)`. May be fed in
+arbitrarily small chunks; all parse state lives in the `IStream`, so a field
+(even a string / blob payload) can straddle any number of `Feed` calls.
+
+**`IVisitor`** — the read surface; every method is a default no-op, so you
+override only the kinds you consume:
+
+| Callback | Hands the caller |
+|----------|------------------|
+| `Unsigned(int id, ulong value)` | a `ulong`, by value (also each unsigned array element) |
+| `Signed(int id, long value)` | a `long`, by value (also each signed array element) |
+| `Fp32(int id, float value)` | a `float`, by value (also each `fp32` array element) |
+| `Fp64(int id, double value)` | a `double`, by value (also each `fp64` array element) |
+| `String(int id, int total, int offset, byte[] data, int chunkOffset, int chunkLength)` | a chunk of UTF-8 bytes **viewing the input buffer** (`data[chunkOffset .. chunkOffset+chunkLength)`); `total` is the full field length, `offset` the chunk's position within the field |
+| `Blob(int id, int total, int offset, byte[] data, int chunkOffset, int chunkLength)` | a chunk of raw bytes, same view-into-input contract as `String` |
+| `ArrayBegin(int id, ArrayKind kind, int count)` | the announcement that `count` elements of `kind` follow through the scalar / float callbacks with the same `id` |
+| `SequenceBegin(int id)` / `SequenceEnd()` | entry / exit of a nested id scope |
+
+A string / blob field is delivered as **one chunk when it is fully present** in
+the fed buffer, and as **several chunks** when it is split across `Feed` calls;
+each chunk always points into the buffer of the `Feed` that produced it. An empty
+string / blob is reported as a single call with `total == 0` and
+`chunkLength == 0`.
+
+### Allowed types
+
+| Field | Encoder | Decoder | Notes |
+|-------|---------|---------|-------|
+| unsigned int | `WriteUnsigned` (`ulong`) | `Unsigned` (`ulong`) | the 64-bit scalar holds u8..u64 |
+| signed int | `WriteSigned` (`long`) | `Signed` (`long`) | ZigZag; holds i8..i64 |
+| bool | `WriteBoolean` | `Unsigned` (`0` / `1`) | bool is just an unsigned `0`/`1` on the wire |
+| fp32 / fp64 | `WriteFp32` / `WriteFp64` | `Fp32` / `Fp64` | `float` = fp32, `double` = fp64 |
+| string | `WriteString` | `String` | UTF-8, no terminator |
+| blob | `WriteBlob` | `Blob` | arbitrary bytes |
+| unsigned array | `WriteArrayUnsigned` ×4 widths | `ArrayBegin(Unsigned)` + `Unsigned` per element | element widths u8/u16/u32/u64 |
+| signed array | `WriteArraySigned` ×4 widths | `ArrayBegin(Signed)` + `Signed` per element | element widths i8/i16/i32/i64 |
+| fixlen (float) array | `WriteArrayFp32` / `WriteArrayFp64` | `ArrayBegin(Fixlen)` + `Fp32` / `Fp64` per element | only `fp32` / `fp64` are valid fixlen-array elements |
+
+**Disallowed:** dynamic-length subtypes (`string`, `blob`) as **fixlen-array
+elements** — the encoder offers no such overload and the decoder rejects them
+with `SofabError.InvalidMessage` ("dynamic fixlen array element"). Empty arrays
+are rejected on both sides (`SofabError.Argument` / `InvalidMessage`); a `0` array
+count is never legal.
+
+### Memory handling
+
+The library never owns a growable buffer: the encoder writes into a fixed,
+caller-provided array, and the decoder hands back values either by value or as a
+**view into the caller's own input buffer** — there is no internal copy of a
+string / blob payload and no heap allocation per field.
+
+**Encode (`OStream`).** The caller owns the output `byte[]`; `OStream` writes
+straight into it and **never allocates or grows it**. The buffer is fixed-size:
+
+- When it fills with **no** `FlushSink`, the next write throws
+  `SofabError.BufferFull`.
+- When it fills **with** a `FlushSink`, the full buffer is handed to the sink and
+  writing resumes at the *start* of the same array — so a message can exceed the
+  buffer (and even RAM). `Flush()` pushes the tail; `BufferSet` swaps in a fresh
+  caller array (e.g. double-buffering from inside the sink). The sink's `byte[]`
+  is the encoder's live buffer, reused after the call returns, so a sink that
+  retains bytes must copy them.
+
+Per-write allocation is avoided for every scalar, float, blob and array (each
+element is varint- or little-endian-encoded directly into the buffer). The one
+transient allocation is in `WriteString`, which calls `Encoding.UTF8.GetBytes` to
+produce the UTF-8 bytes; encode pre-encoded UTF-8 through `WriteBlob` /
+`WriteFixlen` to avoid even that.
+
+**Decode (`IStream`).** Reads are **copy-vs-view by kind**:
+
+- **Scalars / floats** are decoded into primitives (`ulong` / `long` / `float` /
+  `double`) and passed **by value** — no boxing, no allocation.
+- **String / blob** payloads are handed as `(byte[] data, int chunkOffset, int
+  chunkLength)` pointing **directly into the buffer you passed to `Feed`** —
+  zero-copy, valid only for the duration of the callback. The library never
+  allocates a `string` or copies the bytes; a visitor that wants a `string` calls
+  `Encoding.UTF8.GetString(data, chunkOffset, chunkLength)` itself, and one that
+  retains bytes must copy the chunk.
+- **Arrays** allocate nothing: `ArrayBegin` reports the count and the elements
+  arrive through the scalar / float callbacks, so the caller can stream them into
+  a destination of its choosing.
+
+The decoder's only internal scratch is a fixed **8-byte** accumulator used solely
+to reassemble a single `fp32` / `fp64` value (or a varint) that straddles a
+`Feed` boundary; it is never used for string / blob bytes, which always view the
+input directly.
+
+### Supporting types
+
+`FixlenType` (`Fp32`, `Fp64`, `String`, `Blob`), `ArrayKind` (`Unsigned`,
+`Signed`, `Fixlen`), `SofabError` (`Argument`, `Usage`, `BufferFull`,
+`InvalidMessage`), `SofabException` (`: IOException`, carries `.Error`),
+`FlushSink` (delegate `(byte[] data, int offset, int length)`), and
 `Sofab.ApiVersion` (`== 1`).
 
 ## Feature flags
