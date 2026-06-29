@@ -131,6 +131,12 @@ public sealed class OStream
 
     // --- primitives ---------------------------------------------------------
 
+    /// <summary>
+    /// Append one byte to the active buffer. When the buffer is full, flush it to
+    /// the sink and resume at the start; with no sink this raises
+    /// <see cref="SofabError.BufferFull"/>.
+    /// </summary>
+    /// <param name="b">byte value (low 8 bits used)</param>
     private void PushByte(int b)
     {
         if (_offset >= _end)
@@ -145,6 +151,10 @@ public sealed class OStream
         _buffer[_offset++] = (byte)b;
     }
 
+    /// <summary>Append <paramref name="len"/> raw bytes from <paramref name="data"/>, flushing as needed.</summary>
+    /// <param name="data">source array</param>
+    /// <param name="from">start offset within <paramref name="data"/></param>
+    /// <param name="len">number of bytes to append</param>
     private void PushRaw(byte[] data, int from, int len)
     {
         for (int i = 0; i < len; i++)
@@ -153,6 +163,8 @@ public sealed class OStream
         }
     }
 
+    /// <summary>Append a value as a base-128 LEB128 varint (7 bits per byte, low bytes first).</summary>
+    /// <param name="value">the unsigned value to encode</param>
     private void WriteVarint(ulong value)
     {
         do
@@ -168,6 +180,15 @@ public sealed class OStream
         while (value != 0);
     }
 
+    /// <summary>
+    /// Write a field-header varint packing the field id and 3-bit wire type as
+    /// <c>(id &lt;&lt; 3) | wireType</c>.
+    /// </summary>
+    /// <param name="id">field id (<c>0..ID_MAX</c>)</param>
+    /// <param name="wireType">3-bit wire-type tag (one of the <c>T_*</c> constants)</param>
+    /// <exception cref="SofabException">
+    /// with <see cref="SofabError.Argument"/> if <paramref name="id"/> is out of range
+    /// </exception>
     private void WriteIdType(int id, int wireType)
     {
         if (id < 0 || id > ID_MAX)
@@ -287,6 +308,15 @@ public sealed class OStream
 
     // --- array writers ------------------------------------------------------
 
+    /// <summary>
+    /// Write an array field's id header followed by its element <paramref name="count"/>.
+    /// </summary>
+    /// <param name="id">field id</param>
+    /// <param name="wireType">array wire-type tag (<c>T_VARINTARRAY_*</c> / <c>T_FIXLENARRAY</c>)</param>
+    /// <param name="count">number of elements (must be &gt; 0; empty arrays are not encodable)</param>
+    /// <exception cref="SofabException">
+    /// with <see cref="SofabError.Argument"/> if <paramref name="count"/> is not positive
+    /// </exception>
     private void WriteArrayHeader(int id, int wireType, int count)
     {
         if (count <= 0)
