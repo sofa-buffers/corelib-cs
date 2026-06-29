@@ -17,13 +17,29 @@ namespace sofab;
 internal static class WireFormat
 {
     // --- field-header 3-bit type tags (low 3 bits of the id header varint) ---
+
+    /// <summary>Field-header tag for an unsigned-integer scalar (varint).</summary>
     internal const int T_VARINT_UNSIGNED = 0x0;
+
+    /// <summary>Field-header tag for a signed-integer scalar (ZigZag + varint).</summary>
     internal const int T_VARINT_SIGNED = 0x1;
+
+    /// <summary>Field-header tag for a fixed-length field (float / string / blob).</summary>
     internal const int T_FIXLEN = 0x2;
+
+    /// <summary>Field-header tag for an array of unsigned-integer elements.</summary>
     internal const int T_VARINTARRAY_UNSIGNED = 0x3;
+
+    /// <summary>Field-header tag for an array of signed-integer elements.</summary>
     internal const int T_VARINTARRAY_SIGNED = 0x4;
+
+    /// <summary>Field-header tag for an array of fixed-length (float) elements.</summary>
     internal const int T_FIXLENARRAY = 0x5;
+
+    /// <summary>Field-header tag opening a nested sequence (a fresh id scope).</summary>
     internal const int T_SEQUENCE_START = 0x6;
+
+    /// <summary>Field-header tag closing the most recently opened sequence.</summary>
     internal const int T_SEQUENCE_END = 0x7;
 
     /// <summary>Largest valid field id (<c>INT32_MAX</c>), matching <c>SOFAB_ID_MAX</c>.</summary>

@@ -503,10 +503,12 @@ public sealed class IStream
         return 0;
     }
 
+    /// <summary>Read 4 little-endian bytes at <paramref name="p"/> as an <c>int</c> bit pattern.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static int ReadInt32Le(byte[] d, int p) =>
         (d[p] & 0xFF) | ((d[p + 1] & 0xFF) << 8) | ((d[p + 2] & 0xFF) << 16) | ((d[p + 3] & 0xFF) << 24);
 
+    /// <summary>Read 8 little-endian bytes at <paramref name="p"/> as a <c>long</c> bit pattern.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static long ReadInt64Le(byte[] d, int p)
     {
@@ -515,6 +517,14 @@ public sealed class IStream
         return lo | (hi << 32);
     }
 
+    /// <summary>
+    /// Feed one byte into the byte-at-a-time state machine, dispatching to the
+    /// handler for the current <see cref="State"/>. This is the slow-path fallback
+    /// used for the tail of a field split across a <see cref="Feed(byte[], int, int, IVisitor)"/>
+    /// boundary (<c>FixlenRaw</c> payloads are streamed in bulk by <c>Feed</c> itself).
+    /// </summary>
+    /// <param name="b">the next input byte (low 8 bits used)</param>
+    /// <param name="visitor">sink for decoded fields</param>
     private void Step(int b, IVisitor visitor)
     {
         switch (_state)
@@ -556,6 +566,13 @@ public sealed class IStream
         return false;
     }
 
+    /// <summary>
+    /// Accumulate the field-header varint; once complete, decode the id and 3-bit
+    /// wire type and transition to the matching value/array/sequence state.
+    /// Sequences are emitted inline (depth-checked) and leave the machine idle.
+    /// </summary>
+    /// <param name="b">the next input byte</param>
+    /// <param name="visitor">sink for decoded fields</param>
     private void StepIdle(int b, IVisitor visitor)
     {
         if (!VarintPush(b))
@@ -618,6 +635,13 @@ public sealed class IStream
         }
     }
 
+    /// <summary>
+    /// Accumulate an unsigned-varint value (a scalar field or one array element);
+    /// once complete, push it to the visitor and advance to the next element or
+    /// back to idle.
+    /// </summary>
+    /// <param name="b">the next input byte</param>
+    /// <param name="visitor">sink for decoded fields</param>
     private void StepVarintUnsigned(int b, IVisitor visitor)
     {
         if (VarintPush(b))
@@ -627,6 +651,13 @@ public sealed class IStream
         }
     }
 
+    /// <summary>
+    /// Accumulate a signed-varint value (a scalar field or one array element);
+    /// once complete, ZigZag-decode it, push it to the visitor and advance to the
+    /// next element or back to idle.
+    /// </summary>
+    /// <param name="b">the next input byte</param>
+    /// <param name="visitor">sink for decoded fields</param>
     private void StepVarintSigned(int b, IVisitor visitor)
     {
         if (VarintPush(b))
@@ -651,6 +682,15 @@ public sealed class IStream
         _state = State.Idle;
     }
 
+    /// <summary>
+    /// Accumulate the fixlen type+length header. Once complete it validates the
+    /// sub-type and length, then: floats transition to <c>FixlenVal</c>; a
+    /// zero-length string/blob is emitted immediately as an empty chunk; a
+    /// non-empty string/blob transitions to <c>FixlenRaw</c> for chunked streaming.
+    /// String/blob sub-types are rejected when reached as a fixlen-array element.
+    /// </summary>
+    /// <param name="b">the next input byte</param>
+    /// <param name="visitor">sink for decoded fields</param>
     private void StepFixlenLen(int b, IVisitor visitor)
     {
         if (!VarintPush(b))
@@ -716,6 +756,15 @@ public sealed class IStream
         }
     }
 
+    /// <summary>
+    /// Accumulate the raw little-endian bytes of a fixed-size float value
+    /// (<c>fp32</c> / <c>fp64</c>) into <see cref="_acc"/>. Once the value is
+    /// complete it is decoded and pushed to the visitor; within an array the
+    /// element size is reused for the next element, otherwise the machine returns
+    /// to idle.
+    /// </summary>
+    /// <param name="b">the next input byte</param>
+    /// <param name="visitor">sink for decoded fields</param>
     private void StepFixlenVal(int b, IVisitor visitor)
     {
         _acc[_accLen++] = (byte)b;
@@ -762,6 +811,13 @@ public sealed class IStream
         _state = State.Idle;
     }
 
+    /// <summary>
+    /// Accumulate an array's element-count varint. Once complete it validates the
+    /// count, announces the array via <see cref="IVisitor.ArrayBegin"/>, and
+    /// transitions to the per-element state for the array's <see cref="ArrayKind"/>.
+    /// </summary>
+    /// <param name="b">the next input byte</param>
+    /// <param name="visitor">sink for decoded fields</param>
     private void StepArrayCount(int b, IVisitor visitor)
     {
         if (!VarintPush(b))
