@@ -16,7 +16,7 @@
  *                        ignores those ids (auto-skipping the field for any wire type,
  *                        and the whole sub-sequence at any depth when the id names a
  *                        sequence) must still decode the remaining fields and fully
- *                        consume the message.
+ *                        consume the message -- both whole-feed and one byte at a time.
  *
  * A vector's optional "requires" array names capability tags it needs (fixlen,
  * array, sequence, fp64, int64). This full-wire-format implementation supports
@@ -512,6 +512,26 @@ public class TestVectorsConformanceTests
         // truncated structure, so reaching the assert means full consumption).
         var visitor = new SkippingTokenVisitor(v.SkipIds!);
         new IStream().Feed(v.Expected, visitor);
+
+        Assert.Equal(ExpectedTokensSkipping(v.Fields, v.SkipIds!), visitor.Tokens);
+    }
+
+    [Theory]
+    [MemberData(nameof(SkipVectorNames))]
+    public void DecodeSkippingIdsByteByByteMatchesVector(string name)
+    {
+        Vector v = Vectors[name];
+        if (!Runnable(v)) return;
+        Assert.NotNull(v.SkipIds);
+
+        // The chunked variant of the skip-ids scenario: the same skip must hold
+        // when the message arrives one byte at a time across many Feed calls.
+        var visitor = new SkippingTokenVisitor(v.SkipIds!);
+        var iss = new IStream();
+        foreach (byte b in v.Expected)
+        {
+            iss.Feed(new[] { b }, visitor);
+        }
 
         Assert.Equal(ExpectedTokensSkipping(v.Fields, v.SkipIds!), visitor.Tokens);
     }
