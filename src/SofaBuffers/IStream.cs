@@ -230,7 +230,7 @@ public sealed class IStream
             case T_FIXLENARRAY:
                 return FastFixlenArray(data, start, p, end, id, visitor);
             case T_SEQUENCE_START:
-                if (_depth == ulong.MaxValue)
+                if (_depth >= (ulong)MAX_DEPTH)
                 {
                     throw new SofabException(SofabError.InvalidMessage, "sequence too deep");
                 }
@@ -335,12 +335,14 @@ public sealed class IStream
         {
             return 0; // count varint not complete; re-parse from header later
         }
-        if (count == 0 || count > ARRAY_MAX)
+        if (count > ARRAY_MAX)
         {
             throw new SofabException(SofabError.InvalidMessage, "array count");
         }
         p += n;
         int remaining = (int)count;
+        // A zero-count array (§4.7) is just [ header ][ count=0 ]: announce it and
+        // resume at the next field without reading any elements.
         visitor.ArrayBegin(id, kind, remaining);
 
         while (remaining > 0)
@@ -384,13 +386,20 @@ public sealed class IStream
         {
             return 0;
         }
-        if (count == 0 || count > ARRAY_MAX)
+        if (count > ARRAY_MAX)
         {
             throw new SofabException(SofabError.InvalidMessage, "array count");
         }
         p += n;
         int remaining = (int)count;
         visitor.ArrayBegin(id, ArrayKind.Fixlen, remaining);
+
+        // A zero-count fixlen array (§4.8) carries no fixlen_word and no payload:
+        // it is exactly [ header ][ count=0 ]. Resume at the next field.
+        if (remaining == 0)
+        {
+            return p - start;
+        }
 
         // Single type+length header for the whole array.
         int hn = ReadVarint(data, p, end, out ulong lenHeader);
@@ -613,7 +622,7 @@ public sealed class IStream
                 _state = State.ArrayCount;
                 break;
             case T_SEQUENCE_START:
-                if (_depth == ulong.MaxValue)
+                if (_depth >= (ulong)MAX_DEPTH)
                 {
                     throw new SofabException(SofabError.InvalidMessage, "sequence too deep");
                 }
@@ -825,14 +834,26 @@ public sealed class IStream
             return;
         }
         ulong count = _varintOut;
-        if (count == 0 || count > ARRAY_MAX)
+        if (count > ARRAY_MAX)
         {
             throw new SofabException(SofabError.InvalidMessage, "array count");
         }
         int c = (int)count;
+        visitor.ArrayBegin(_id, _arrayKind, c);
+
+        // A zero-count array (§4.7–4.8) has no elements -- and a zero-count fixlen
+        // array carries no fixlen_word -- so return straight to idle without
+        // entering a per-element state (which would otherwise consume the next
+        // field's bytes / expect an absent fixlen_word).
+        if (c == 0)
+        {
+            _inArray = false;
+            _state = State.Idle;
+            return;
+        }
+
         _arrayRemaining = c;
         _inArray = true;
-        visitor.ArrayBegin(_id, _arrayKind, c);
 
         switch (_arrayKind)
         {

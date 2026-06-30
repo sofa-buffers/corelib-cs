@@ -131,18 +131,119 @@ public class EncoderOverloadsTests
         Assert.Equal(SofabError.Argument, ex.Error);
     }
 
-    [Fact]
-    public void EmptyArraysRejected()
+    private sealed class ArraySink : IVisitor
     {
-        var os = new OStream(new byte[16]);
-        Assert.Equal(SofabError.Argument,
-            Assert.Throws<SofabException>(() => os.WriteArrayUnsigned(1, Array.Empty<uint>())).Error);
-        Assert.Equal(SofabError.Argument,
-            Assert.Throws<SofabException>(() => os.WriteArraySigned(1, Array.Empty<long>())).Error);
-        Assert.Equal(SofabError.Argument,
-            Assert.Throws<SofabException>(() => os.WriteArrayFp32(1, Array.Empty<float>())).Error);
-        Assert.Equal(SofabError.Argument,
-            Assert.Throws<SofabException>(() => os.WriteArrayFp64(1, Array.Empty<double>())).Error);
+        public int Begins;
+        public ArrayKind LastKind;
+        public int LastCount = -1;
+        public int Elements;
+        public void ArrayBegin(int id, ArrayKind kind, int count)
+        {
+            Begins++;
+            LastKind = kind;
+            LastCount = count;
+        }
+        public void Unsigned(int id, ulong v) { Elements++; }
+        public void Signed(int id, long v) { Elements++; }
+        public void Fp32(int id, float v) { Elements++; }
+        public void Fp64(int id, double v) { Elements++; }
+    }
+
+    [Fact]
+    public void ZeroCountArraysRoundtrip()
+    {
+        var buf = new byte[16];
+
+        // Zero-count unsigned array: exactly [ header (id 1 | type 3) ][ count = 0 ].
+        var os = new OStream(buf);
+        os.WriteArrayUnsigned(1, Array.Empty<uint>());
+        Assert.Equal(2, os.BytesUsed);
+        Assert.Equal((byte)((1 << 3) | 0x3), buf[0]);
+        Assert.Equal(0, buf[1]);
+        var sink = new ArraySink();
+        new IStream().Feed(buf, 0, os.BytesUsed, sink);
+        Assert.Equal(1, sink.Begins);
+        Assert.Equal(ArrayKind.Unsigned, sink.LastKind);
+        Assert.Equal(0, sink.LastCount);
+        Assert.Equal(0, sink.Elements);
+
+        // Zero-count signed array.
+        os = new OStream(buf);
+        os.WriteArraySigned(1, Array.Empty<long>());
+        Assert.Equal(2, os.BytesUsed);
+        Assert.Equal((byte)((1 << 3) | 0x4), buf[0]);
+        Assert.Equal(0, buf[1]);
+        sink = new ArraySink();
+        new IStream().Feed(buf, 0, os.BytesUsed, sink);
+        Assert.Equal(1, sink.Begins);
+        Assert.Equal(ArrayKind.Signed, sink.LastKind);
+        Assert.Equal(0, sink.LastCount);
+        Assert.Equal(0, sink.Elements);
+
+        // Zero-count fp32 fixlen array: no fixlen_word and no payload follow (§4.8).
+        os = new OStream(buf);
+        os.WriteArrayFp32(1, Array.Empty<float>());
+        Assert.Equal(2, os.BytesUsed);
+        Assert.Equal((byte)((1 << 3) | 0x5), buf[0]);
+        Assert.Equal(0, buf[1]);
+        sink = new ArraySink();
+        new IStream().Feed(buf, 0, os.BytesUsed, sink);
+        Assert.Equal(1, sink.Begins);
+        Assert.Equal(ArrayKind.Fixlen, sink.LastKind);
+        Assert.Equal(0, sink.LastCount);
+        Assert.Equal(0, sink.Elements);
+
+        // Zero-count fp64 fixlen array (same wire form as fp32: no fixlen_word).
+        os = new OStream(buf);
+        os.WriteArrayFp64(1, Array.Empty<double>());
+        Assert.Equal(2, os.BytesUsed);
+        Assert.Equal((byte)((1 << 3) | 0x5), buf[0]);
+        Assert.Equal(0, buf[1]);
+        sink = new ArraySink();
+        new IStream().Feed(buf, 0, os.BytesUsed, sink);
+        Assert.Equal(1, sink.Begins);
+        Assert.Equal(ArrayKind.Fixlen, sink.LastKind);
+        Assert.Equal(0, sink.LastCount);
+        Assert.Equal(0, sink.Elements);
+    }
+
+    [Fact]
+    public void ZeroCountArrayResumesNextField()
+    {
+        // A zero-count array must not swallow the following field. Encode an empty
+        // unsigned array then a scalar, and confirm both decode (byte-by-byte too).
+        var buf = new byte[16];
+        var os = new OStream(buf);
+        os.WriteArrayUnsigned(1, Array.Empty<uint>());
+        os.WriteUnsigned(2, 42);
+        int len = os.BytesUsed;
+
+        var whole = new ArraySink();
+        new IStream().Feed(buf, 0, len, whole);
+        Assert.Equal(1, whole.Begins);
+        Assert.Equal(1, whole.Elements); // the trailing scalar, not an array element
+
+        // Same result feeding one byte at a time (exercises the byte machine).
+        var chunked = new ArraySink();
+        var iss = new IStream();
+        for (int i = 0; i < len; i++)
+        {
+            iss.Feed(buf, i, 1, chunked);
+        }
+        Assert.Equal(1, chunked.Begins);
+        Assert.Equal(1, chunked.Elements);
+    }
+
+    [Fact]
+    public void SequenceDepthBeyondMaxRejectedOnEncode()
+    {
+        var os = new OStream(new byte[1024]);
+        for (int i = 0; i < 255; i++)
+        {
+            os.WriteSequenceBegin(0); // 255 levels open fine
+        }
+        var ex = Assert.Throws<SofabException>(() => os.WriteSequenceBegin(0)); // 256th rejected
+        Assert.Equal(SofabError.Argument, ex.Error);
     }
 
     [Fact]

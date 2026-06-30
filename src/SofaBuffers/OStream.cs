@@ -42,6 +42,7 @@ public sealed class OStream
     private byte[] _buffer;
     private int _end;
     private int _offset;
+    private int _depth;
     private readonly FlushSink? _sink;
 
     /// <summary>
@@ -313,16 +314,10 @@ public sealed class OStream
     /// </summary>
     /// <param name="id">field id</param>
     /// <param name="wireType">array wire-type tag (<c>T_VARINTARRAY_*</c> / <c>T_FIXLENARRAY</c>)</param>
-    /// <param name="count">number of elements (must be &gt; 0; empty arrays are not encodable)</param>
-    /// <exception cref="SofabException">
-    /// with <see cref="SofabError.Argument"/> if <paramref name="count"/> is not positive
-    /// </exception>
+    /// <param name="count">number of elements (<c>0</c> is valid: a zero-count array is
+    /// exactly <c>[ header ][ count=0 ]</c> with no elements, per §4.7)</param>
     private void WriteArrayHeader(int id, int wireType, int count)
     {
-        if (count <= 0)
-        {
-            throw new SofabException(SofabError.Argument, "empty array");
-        }
         WriteIdType(id, wireType);
         WriteVarint((uint)count);
     }
@@ -428,12 +423,12 @@ public sealed class OStream
     /// <param name="data">elements</param>
     public void WriteArrayFp32(int id, float[] data)
     {
-        if (data.Length == 0)
-        {
-            throw new SofabException(SofabError.Argument, "empty array");
-        }
         WriteIdType(id, T_FIXLENARRAY);
         WriteVarint((uint)data.Length);
+        if (data.Length == 0)
+        {
+            return; // zero-count fixlen array: no fixlen_word, no payload (§4.8)
+        }
         WriteVarint((4UL << 3) | (uint)FixlenType.Fp32.Raw());
         foreach (float v in data)
         {
@@ -450,12 +445,12 @@ public sealed class OStream
     /// <param name="data">elements</param>
     public void WriteArrayFp64(int id, double[] data)
     {
-        if (data.Length == 0)
-        {
-            throw new SofabException(SofabError.Argument, "empty array");
-        }
         WriteIdType(id, T_FIXLENARRAY);
         WriteVarint((uint)data.Length);
+        if (data.Length == 0)
+        {
+            return; // zero-count fixlen array: no fixlen_word, no payload (§4.8)
+        }
         WriteVarint((8UL << 3) | (uint)FixlenType.Fp64.Raw());
         foreach (double v in data)
         {
@@ -475,14 +470,27 @@ public sealed class OStream
     /// sequence and form a fresh id scope.
     /// </summary>
     /// <param name="id">field id of the sequence</param>
+    /// <exception cref="SofabException">
+    /// with <see cref="SofabError.Argument"/> if opening this sequence would nest
+    /// deeper than <c>MAX_DEPTH</c> (255) levels
+    /// </exception>
     public void WriteSequenceBegin(int id)
     {
+        if (_depth >= MAX_DEPTH)
+        {
+            throw new SofabException(SofabError.Argument, "sequence too deep");
+        }
         WriteIdType(id, T_SEQUENCE_START);
+        _depth++;
     }
 
     /// <summary>Close the most recently opened nested sequence.</summary>
     public void WriteSequenceEnd()
     {
         WriteIdType(0, T_SEQUENCE_END);
+        if (_depth > 0)
+        {
+            _depth--;
+        }
     }
 }
