@@ -1,4 +1,4 @@
 #!/usr/bin/env bash
 set -eo pipefail
 
-docker exec -it cs-devcontainer bash
+docker exec -it corelib-cs-dev bash
