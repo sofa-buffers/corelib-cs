@@ -51,6 +51,13 @@ internal static class WireFormat
     /// </summary>
     internal const ulong ARRAY_MAX = int.MaxValue;
 
+    /// <summary>
+    /// Maximum nested-sequence depth (<c>MAX_DEPTH</c>), matching <c>SOFAB_MAX_DEPTH</c>.
+    /// An encoder must not open more than this many nested sequences and a decoder
+    /// rejects a message that nests deeper with <see cref="SofabError.InvalidMessage"/>.
+    /// </summary>
+    internal const int MAX_DEPTH = 255;
+
     /// <summary>Number of value bits; bounds the maximum varint length (64-bit value type).</summary>
     internal const int VALUE_BITS = 64;
 

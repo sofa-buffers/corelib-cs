@@ -127,9 +127,36 @@ public class IStreamTests
     }
 
     [Fact]
-    public void ZeroLengthArrayRejected()
+    public void ZeroCountArraysAccepted()
     {
-        var ex = Assert.Throws<SofabException>(() => Decode(Bytes(0x03, 0x00)));
+        // Unsigned (0x03), signed (0x04) and fixlen (0x05) arrays, id 0, count 0.
+        // A zero-count array is just [ header ][ count=0 ] (§4.7-4.8); the fixlen
+        // form carries no fixlen_word. Each yields a single ArrayBegin, no elements.
+        Assert.Equal(new[] { "arr:0:UNSIGNED:0" }, Decode(Bytes(0x03, 0x00)));
+        Assert.Equal(new[] { "arr:0:SIGNED:0" }, Decode(Bytes(0x04, 0x00)));
+        Assert.Equal(new[] { "arr:0:FIXLEN:0" }, Decode(Bytes(0x05, 0x00)));
+
+        // Byte-at-a-time must agree (exercises StepArrayCount's zero-count path).
+        Assert.Equal(new[] { "arr:0:FIXLEN:0" }, DecodeByteByByte(Bytes(0x05, 0x00)));
+    }
+
+    [Fact]
+    public void NestingBeyondMaxDepthRejected()
+    {
+        // 255 sequence starts (0x06) decode fine; the 256th must be rejected.
+        var ok = new byte[255];
+        for (int i = 0; i < 255; i++)
+        {
+            ok[i] = 0x06;
+        }
+        Assert.Equal(255, Decode(ok).Count); // 255 SequenceBegin events, no throw
+
+        var bad = new byte[256];
+        for (int i = 0; i < 256; i++)
+        {
+            bad[i] = 0x06;
+        }
+        var ex = Assert.Throws<SofabException>(() => Decode(bad));
         Assert.Equal(SofabError.InvalidMessage, ex.Error);
     }
 

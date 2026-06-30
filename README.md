@@ -36,7 +36,14 @@ unit tests here use the exact byte vectors from the
 C++, Rust, Java and Go implementations.
 
 NuGet package id: `SofaBuffers` · namespace `sofab` (fixed by the format spec, as
-in the C++ `namespace sofab`). Targets .NET 9 (`net9.0`).
+in the C++ `namespace sofab`). Install it with:
+
+```sh
+dotnet add package SofaBuffers
+```
+
+**Minimum version:** .NET SDK 9.0 or later (targets `net9.0`); no runtime
+dependencies.
 
 ## Why this design
 
