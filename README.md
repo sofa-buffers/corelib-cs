@@ -35,11 +35,11 @@ unit tests here use the exact byte vectors from the
 (`test/c/test_ostream.c`) to guarantee byte-for-byte interoperability with the C,
 C++, Rust, Java and Go implementations.
 
-NuGet package id: `SofaBuffers` · namespace `sofab` (fixed by the format spec, as
-in the C++ `namespace sofab`). Install it with:
+NuGet package id: `SofaBuffers.Corelib` · namespace `sofab` (fixed by the format
+spec, as in the C++ `namespace sofab`). Install it with:
 
 ```sh
-dotnet add package SofaBuffers
+dotnet add package SofaBuffers.Corelib
 ```
 
 **Minimum version:** .NET SDK 9.0 or later (targets `net9.0`); no runtime
