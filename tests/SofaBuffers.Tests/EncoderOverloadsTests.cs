@@ -180,12 +180,14 @@ public class EncoderOverloadsTests
         Assert.Equal(0, sink.LastCount);
         Assert.Equal(0, sink.Elements);
 
-        // Zero-count fp32 fixlen array: no fixlen_word and no payload follow (§4.8).
+        // Zero-count fp32 fixlen array: the fixlen_word is still emitted (so it is
+        // distinguishable from an empty fp64 array), followed by no payload (§4.8).
         os = new OStream(buf);
         os.WriteArrayFp32(1, Array.Empty<float>());
-        Assert.Equal(2, os.BytesUsed);
+        Assert.Equal(3, os.BytesUsed);
         Assert.Equal((byte)((1 << 3) | 0x5), buf[0]);
         Assert.Equal(0, buf[1]);
+        Assert.Equal((byte)((4 << 3) | 0x0), buf[2]); // fixlen_word 0x20: len 4, fp32
         sink = new ArraySink();
         new IStream().Feed(buf, 0, os.BytesUsed, sink);
         Assert.Equal(1, sink.Begins);
@@ -193,12 +195,14 @@ public class EncoderOverloadsTests
         Assert.Equal(0, sink.LastCount);
         Assert.Equal(0, sink.Elements);
 
-        // Zero-count fp64 fixlen array (same wire form as fp32: no fixlen_word).
+        // Zero-count fp64 fixlen array: carries its own fixlen_word too, so it is
+        // no longer byte-identical to an empty fp32 array.
         os = new OStream(buf);
         os.WriteArrayFp64(1, Array.Empty<double>());
-        Assert.Equal(2, os.BytesUsed);
+        Assert.Equal(3, os.BytesUsed);
         Assert.Equal((byte)((1 << 3) | 0x5), buf[0]);
         Assert.Equal(0, buf[1]);
+        Assert.Equal((byte)((8 << 3) | 0x1), buf[2]); // fixlen_word 0x41: len 8, fp64
         sink = new ArraySink();
         new IStream().Feed(buf, 0, os.BytesUsed, sink);
         Assert.Equal(1, sink.Begins);

@@ -130,14 +130,16 @@ public class IStreamTests
     public void ZeroCountArraysAccepted()
     {
         // Unsigned (0x03), signed (0x04) and fixlen (0x05) arrays, id 0, count 0.
-        // A zero-count array is just [ header ][ count=0 ] (§4.7-4.8); the fixlen
-        // form carries no fixlen_word. Each yields a single ArrayBegin, no elements.
+        // A zero-count integer array is just [ header ][ count=0 ] (§4.7); a
+        // zero-count fixlen array still carries its fixlen_word (§4.8, here 0x20
+        // for fp32). Each yields a single ArrayBegin, no elements.
         Assert.Equal(new[] { "arr:0:UNSIGNED:0" }, Decode(Bytes(0x03, 0x00)));
         Assert.Equal(new[] { "arr:0:SIGNED:0" }, Decode(Bytes(0x04, 0x00)));
-        Assert.Equal(new[] { "arr:0:FIXLEN:0" }, Decode(Bytes(0x05, 0x00)));
+        Assert.Equal(new[] { "arr:0:FIXLEN:0" }, Decode(Bytes(0x05, 0x00, 0x20)));
 
-        // Byte-at-a-time must agree (exercises StepArrayCount's zero-count path).
-        Assert.Equal(new[] { "arr:0:FIXLEN:0" }, DecodeByteByByte(Bytes(0x05, 0x00)));
+        // Byte-at-a-time must agree (exercises StepArrayCount's zero-count path
+        // and StepFixlenLen consuming the fixlen_word of an empty array).
+        Assert.Equal(new[] { "arr:0:FIXLEN:0" }, DecodeByteByByte(Bytes(0x05, 0x00, 0x20)));
     }
 
     [Fact]
