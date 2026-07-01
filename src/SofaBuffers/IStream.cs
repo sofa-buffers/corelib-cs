@@ -394,14 +394,9 @@ public sealed class IStream
         int remaining = (int)count;
         visitor.ArrayBegin(id, ArrayKind.Fixlen, remaining);
 
-        // A zero-count fixlen array (§4.8) carries no fixlen_word and no payload:
-        // it is exactly [ header ][ count=0 ]. Resume at the next field.
-        if (remaining == 0)
-        {
-            return p - start;
-        }
-
-        // Single type+length header for the whole array.
+        // Single type+length header for the whole array. A fixlen array always
+        // carries its fixlen_word, even when empty (§4.8): the header is read and
+        // validated here, and the payload loop below simply runs zero times.
         int hn = ReadVarint(data, p, end, out ulong lenHeader);
         if (hn == 0)
         {
@@ -763,6 +758,15 @@ public sealed class IStream
             default:
                 throw new SofabException(SofabError.InvalidMessage, "fixlen type");
         }
+
+        // An empty fixlen array (§4.8) carries its fixlen_word but no payload: the
+        // word has now been consumed and validated, so finish the array rather
+        // than reading a (non-existent) element.
+        if (_inArray && _arrayRemaining == 0)
+        {
+            _inArray = false;
+            _state = State.Idle;
+        }
     }
 
     /// <summary>
@@ -841,12 +845,19 @@ public sealed class IStream
         int c = (int)count;
         visitor.ArrayBegin(_id, _arrayKind, c);
 
-        // A zero-count array (§4.7–4.8) has no elements -- and a zero-count fixlen
-        // array carries no fixlen_word -- so return straight to idle without
-        // entering a per-element state (which would otherwise consume the next
-        // field's bytes / expect an absent fixlen_word).
+        // A zero-count array has no elements. An empty integer array (§4.7) ends
+        // right here. An empty fixlen array (§4.8) still carries its fixlen_word,
+        // so enter FixlenLen (with _arrayRemaining == 0) to read and validate it
+        // before finishing; any other zero-count array returns straight to idle.
         if (c == 0)
         {
+            if (_arrayKind == ArrayKind.Fixlen)
+            {
+                _arrayRemaining = 0;
+                _inArray = true;
+                _state = State.FixlenLen;
+                return;
+            }
             _inArray = false;
             _state = State.Idle;
             return;

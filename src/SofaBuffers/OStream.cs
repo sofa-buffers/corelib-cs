@@ -425,10 +425,8 @@ public sealed class OStream
     {
         WriteIdType(id, T_FIXLENARRAY);
         WriteVarint((uint)data.Length);
-        if (data.Length == 0)
-        {
-            return; // zero-count fixlen array: no fixlen_word, no payload (§4.8)
-        }
+        // A fixlen array always carries its fixlen_word, even when empty (§4.8),
+        // so an empty fp32 array is distinguishable from an empty fp64 array.
         WriteVarint((4UL << 3) | (uint)FixlenType.Fp32.Raw());
         foreach (float v in data)
         {
@@ -447,10 +445,8 @@ public sealed class OStream
     {
         WriteIdType(id, T_FIXLENARRAY);
         WriteVarint((uint)data.Length);
-        if (data.Length == 0)
-        {
-            return; // zero-count fixlen array: no fixlen_word, no payload (§4.8)
-        }
+        // A fixlen array always carries its fixlen_word, even when empty (§4.8),
+        // so an empty fp64 array is distinguishable from an empty fp32 array.
         WriteVarint((8UL << 3) | (uint)FixlenType.Fp64.Raw());
         foreach (double v in data)
         {
