@@ -5,6 +5,7 @@
  */
 
 using System;
+using System.Buffers.Binary;
 using System.Text;
 
 using static sofab.WireFormat;
@@ -153,20 +154,72 @@ public sealed class OStream
     }
 
     /// <summary>Append <paramref name="len"/> raw bytes from <paramref name="data"/>, flushing as needed.</summary>
+    /// <remarks>
+    /// Copies in bulk up to each buffer boundary instead of byte-by-byte, so a
+    /// large payload streams out in a handful of <see cref="Array.Copy(Array, int, Array, int, int)"/> calls.
+    /// </remarks>
     /// <param name="data">source array</param>
     /// <param name="from">start offset within <paramref name="data"/></param>
     /// <param name="len">number of bytes to append</param>
     private void PushRaw(byte[] data, int from, int len)
     {
-        for (int i = 0; i < len; i++)
+        int src = from;
+        int remaining = len;
+        while (remaining > 0)
         {
-            PushByte(data[from + i]);
+            if (_offset >= _end)
+            {
+                if (_sink == null)
+                {
+                    throw new SofabException(SofabError.BufferFull);
+                }
+                _sink(_buffer, 0, _offset);
+                _offset = 0;
+            }
+            int n = Math.Min(_end - _offset, remaining);
+            Array.Copy(data, src, _buffer, _offset, n);
+            _offset += n;
+            src += n;
+            remaining -= n;
         }
     }
 
     /// <summary>Append a value as a base-128 LEB128 varint (7 bits per byte, low bytes first).</summary>
+    /// <remarks>
+    /// Fast path: a varint is at most 10 bytes. When that much room is
+    /// guaranteed, advance a local cursor over the buffer with no per-byte
+    /// bounds or flush check; single-byte values (field headers, small scalars)
+    /// are by far the most common and skip the loop entirely.
+    /// </remarks>
     /// <param name="value">the unsigned value to encode</param>
     private void WriteVarint(ulong value)
+    {
+        int p = _offset;
+        if (_end - p >= 10)
+        {
+            byte[] b = _buffer;
+            if (value < 0x80)
+            {
+                b[p] = (byte)value;
+                _offset = p + 1;
+                return;
+            }
+            do
+            {
+                b[p++] = (byte)(value | 0x80);
+                value >>= 7;
+            }
+            while (value >= 0x80);
+            b[p++] = (byte)value;
+            _offset = p;
+            return;
+        }
+        WriteVarintSlow(value);
+    }
+
+    /// <summary>Buffer-spanning varint write: flushes mid-value when the buffer is tiny.</summary>
+    /// <param name="value">the unsigned value to encode</param>
+    private void WriteVarintSlow(ulong value)
     {
         do
         {
@@ -260,10 +313,39 @@ public sealed class OStream
         int bits = BitConverter.SingleToInt32Bits(value);
         WriteIdType(id, T_FIXLEN);
         WriteVarint((4UL << 3) | (uint)FixlenType.Fp32.Raw());
+        PutLe32(bits);
+    }
+
+    /// <summary>Write four little-endian bytes, fast when the buffer has room.</summary>
+    private void PutLe32(int bits)
+    {
+        int p = _offset;
+        if (_end - p >= 4)
+        {
+            BinaryPrimitives.WriteInt32LittleEndian(_buffer.AsSpan(p, 4), bits);
+            _offset = p + 4;
+            return;
+        }
         PushByte(bits & 0xFF);
         PushByte((bits >> 8) & 0xFF);
         PushByte((bits >> 16) & 0xFF);
         PushByte((int)((uint)bits >> 24) & 0xFF);
+    }
+
+    /// <summary>Write eight little-endian bytes, fast when the buffer has room.</summary>
+    private void PutLe64(long bits)
+    {
+        int p = _offset;
+        if (_end - p >= 8)
+        {
+            BinaryPrimitives.WriteInt64LittleEndian(_buffer.AsSpan(p, 8), bits);
+            _offset = p + 8;
+            return;
+        }
+        for (int i = 0; i < 8; i++)
+        {
+            PushByte((int)((ulong)bits >> (i * 8)) & 0xFF);
+        }
     }
 
     /// <summary>Write a 64-bit float field.</summary>
@@ -274,10 +356,7 @@ public sealed class OStream
         long bits = BitConverter.DoubleToInt64Bits(value);
         WriteIdType(id, T_FIXLEN);
         WriteVarint((8UL << 3) | (uint)FixlenType.Fp64.Raw());
-        for (int i = 0; i < 8; i++)
-        {
-            PushByte((int)((ulong)bits >> (i * 8)) & 0xFF);
-        }
+        PutLe64(bits);
     }
 
     /// <summary>Write a string field (raw UTF-8 bytes, no NUL on the wire).</summary>
@@ -285,8 +364,20 @@ public sealed class OStream
     /// <param name="text">string value</param>
     public void WriteString(int id, string text)
     {
+        // Encode UTF-8 straight into the output buffer instead of allocating an
+        // intermediate byte[] per call: measure once (vectorized), then let the
+        // runtime encoder write in place when the buffer has room.
+        int n = Encoding.UTF8.GetByteCount(text);
+        WriteIdType(id, T_FIXLEN);
+        WriteVarint(((ulong)n << 3) | (uint)FixlenType.String.Raw());
+        if (_end - _offset >= n)
+        {
+            _offset += Encoding.UTF8.GetBytes(text, 0, text.Length, _buffer, _offset);
+            return;
+        }
+        // Buffer-spanning write: fall back to a temp array streamed via PushRaw.
         byte[] bytes = Encoding.UTF8.GetBytes(text);
-        WriteFixlen(id, bytes, 0, bytes.Length, FixlenType.String);
+        PushRaw(bytes, 0, bytes.Length);
     }
 
     /// <summary>Write a binary blob field.</summary>
@@ -328,10 +419,29 @@ public sealed class OStream
     public void WriteArrayUnsigned(int id, byte[] data)
     {
         WriteArrayHeader(id, T_VARINTARRAY_UNSIGNED, data.Length);
-        foreach (byte e in data)
-        {
-            WriteVarint(e);
-        }
+        byte[] b = _buffer;
+        int p = _offset;
+        int e = _end;
+        foreach (byte elem in data)
+        {{
+            ulong v = elem;
+            if (e - p < 10)
+            {{
+                _offset = p;
+                WriteVarintSlow(v);
+                b = _buffer;
+                p = _offset;
+                e = _end;
+                continue;
+            }}
+            while (v >= 0x80)
+            {{
+                b[p++] = (byte)(v | 0x80);
+                v >>= 7;
+            }}
+            b[p++] = (byte)v;
+        }}
+        _offset = p;
     }
 
     /// <summary>Write an array of unsigned 16-bit integers.</summary>
@@ -340,10 +450,29 @@ public sealed class OStream
     public void WriteArrayUnsigned(int id, ushort[] data)
     {
         WriteArrayHeader(id, T_VARINTARRAY_UNSIGNED, data.Length);
-        foreach (ushort e in data)
-        {
-            WriteVarint(e);
-        }
+        byte[] b = _buffer;
+        int p = _offset;
+        int e = _end;
+        foreach (ushort elem in data)
+        {{
+            ulong v = elem;
+            if (e - p < 10)
+            {{
+                _offset = p;
+                WriteVarintSlow(v);
+                b = _buffer;
+                p = _offset;
+                e = _end;
+                continue;
+            }}
+            while (v >= 0x80)
+            {{
+                b[p++] = (byte)(v | 0x80);
+                v >>= 7;
+            }}
+            b[p++] = (byte)v;
+        }}
+        _offset = p;
     }
 
     /// <summary>Write an array of unsigned 32-bit integers.</summary>
@@ -352,10 +481,29 @@ public sealed class OStream
     public void WriteArrayUnsigned(int id, uint[] data)
     {
         WriteArrayHeader(id, T_VARINTARRAY_UNSIGNED, data.Length);
-        foreach (uint e in data)
-        {
-            WriteVarint(e);
-        }
+        byte[] b = _buffer;
+        int p = _offset;
+        int e = _end;
+        foreach (uint elem in data)
+        {{
+            ulong v = elem;
+            if (e - p < 10)
+            {{
+                _offset = p;
+                WriteVarintSlow(v);
+                b = _buffer;
+                p = _offset;
+                e = _end;
+                continue;
+            }}
+            while (v >= 0x80)
+            {{
+                b[p++] = (byte)(v | 0x80);
+                v >>= 7;
+            }}
+            b[p++] = (byte)v;
+        }}
+        _offset = p;
     }
 
     /// <summary>Write an array of unsigned 64-bit integers.</summary>
@@ -364,10 +512,29 @@ public sealed class OStream
     public void WriteArrayUnsigned(int id, ulong[] data)
     {
         WriteArrayHeader(id, T_VARINTARRAY_UNSIGNED, data.Length);
-        foreach (ulong e in data)
-        {
-            WriteVarint(e);
-        }
+        byte[] b = _buffer;
+        int p = _offset;
+        int e = _end;
+        foreach (ulong elem in data)
+        {{
+            ulong v = elem;
+            if (e - p < 10)
+            {{
+                _offset = p;
+                WriteVarintSlow(v);
+                b = _buffer;
+                p = _offset;
+                e = _end;
+                continue;
+            }}
+            while (v >= 0x80)
+            {{
+                b[p++] = (byte)(v | 0x80);
+                v >>= 7;
+            }}
+            b[p++] = (byte)v;
+        }}
+        _offset = p;
     }
 
     /// <summary>Write an array of signed 8-bit integers.</summary>
@@ -376,10 +543,29 @@ public sealed class OStream
     public void WriteArraySigned(int id, sbyte[] data)
     {
         WriteArrayHeader(id, T_VARINTARRAY_SIGNED, data.Length);
-        foreach (sbyte e in data)
-        {
-            WriteVarint(ZigzagEncode(e));
-        }
+        byte[] b = _buffer;
+        int p = _offset;
+        int e = _end;
+        foreach (sbyte elem in data)
+        {{
+            ulong v = ZigzagEncode(elem);
+            if (e - p < 10)
+            {{
+                _offset = p;
+                WriteVarintSlow(v);
+                b = _buffer;
+                p = _offset;
+                e = _end;
+                continue;
+            }}
+            while (v >= 0x80)
+            {{
+                b[p++] = (byte)(v | 0x80);
+                v >>= 7;
+            }}
+            b[p++] = (byte)v;
+        }}
+        _offset = p;
     }
 
     /// <summary>Write an array of signed 16-bit integers.</summary>
@@ -388,10 +574,29 @@ public sealed class OStream
     public void WriteArraySigned(int id, short[] data)
     {
         WriteArrayHeader(id, T_VARINTARRAY_SIGNED, data.Length);
-        foreach (short e in data)
-        {
-            WriteVarint(ZigzagEncode(e));
-        }
+        byte[] b = _buffer;
+        int p = _offset;
+        int e = _end;
+        foreach (short elem in data)
+        {{
+            ulong v = ZigzagEncode(elem);
+            if (e - p < 10)
+            {{
+                _offset = p;
+                WriteVarintSlow(v);
+                b = _buffer;
+                p = _offset;
+                e = _end;
+                continue;
+            }}
+            while (v >= 0x80)
+            {{
+                b[p++] = (byte)(v | 0x80);
+                v >>= 7;
+            }}
+            b[p++] = (byte)v;
+        }}
+        _offset = p;
     }
 
     /// <summary>Write an array of signed 32-bit integers.</summary>
@@ -400,10 +605,29 @@ public sealed class OStream
     public void WriteArraySigned(int id, int[] data)
     {
         WriteArrayHeader(id, T_VARINTARRAY_SIGNED, data.Length);
-        foreach (int e in data)
-        {
-            WriteVarint(ZigzagEncode(e));
-        }
+        byte[] b = _buffer;
+        int p = _offset;
+        int e = _end;
+        foreach (int elem in data)
+        {{
+            ulong v = ZigzagEncode(elem);
+            if (e - p < 10)
+            {{
+                _offset = p;
+                WriteVarintSlow(v);
+                b = _buffer;
+                p = _offset;
+                e = _end;
+                continue;
+            }}
+            while (v >= 0x80)
+            {{
+                b[p++] = (byte)(v | 0x80);
+                v >>= 7;
+            }}
+            b[p++] = (byte)v;
+        }}
+        _offset = p;
     }
 
     /// <summary>Write an array of signed 64-bit integers.</summary>
@@ -412,10 +636,29 @@ public sealed class OStream
     public void WriteArraySigned(int id, long[] data)
     {
         WriteArrayHeader(id, T_VARINTARRAY_SIGNED, data.Length);
-        foreach (long e in data)
-        {
-            WriteVarint(ZigzagEncode(e));
-        }
+        byte[] b = _buffer;
+        int p = _offset;
+        int e = _end;
+        foreach (long elem in data)
+        {{
+            ulong v = ZigzagEncode(elem);
+            if (e - p < 10)
+            {{
+                _offset = p;
+                WriteVarintSlow(v);
+                b = _buffer;
+                p = _offset;
+                e = _end;
+                continue;
+            }}
+            while (v >= 0x80)
+            {{
+                b[p++] = (byte)(v | 0x80);
+                v >>= 7;
+            }}
+            b[p++] = (byte)v;
+        }}
+        _offset = p;
     }
 
     /// <summary>Write an array of 32-bit floats.</summary>
@@ -430,11 +673,7 @@ public sealed class OStream
         WriteVarint((4UL << 3) | (uint)FixlenType.Fp32.Raw());
         foreach (float v in data)
         {
-            int bits = BitConverter.SingleToInt32Bits(v);
-            PushByte(bits & 0xFF);
-            PushByte((bits >> 8) & 0xFF);
-            PushByte((bits >> 16) & 0xFF);
-            PushByte((int)((uint)bits >> 24) & 0xFF);
+            PutLe32(BitConverter.SingleToInt32Bits(v));
         }
     }
 
@@ -450,11 +689,7 @@ public sealed class OStream
         WriteVarint((8UL << 3) | (uint)FixlenType.Fp64.Raw());
         foreach (double v in data)
         {
-            long bits = BitConverter.DoubleToInt64Bits(v);
-            for (int i = 0; i < 8; i++)
-            {
-                PushByte((int)((ulong)bits >> (i * 8)) & 0xFF);
-            }
+            PutLe64(BitConverter.DoubleToInt64Bits(v));
         }
     }
 

@@ -5,6 +5,7 @@
  */
 
 using System;
+using System.Buffers.Binary;
 using System.Runtime.CompilerServices;
 
 using static sofab.WireFormat;
@@ -485,6 +486,37 @@ public sealed class IStream
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static int ReadVarint(byte[] data, int pos, int end, out ulong value)
     {
+        int p = pos;
+        if (end - p >= 10)
+        {
+            // Room for a max-length (10-byte) varint: decode with no per-byte
+            // end check, continuation flagged by the sign bit of the raw byte.
+            int b = (sbyte)data[p++];
+            ulong v = (ulong)(b & 0x7F);
+            if (b < 0)
+            {
+                int shift = 7;
+                do
+                {
+                    b = (sbyte)data[p++];
+                    v |= ((ulong)(b & 0x7F)) << shift;
+                    shift += 7;
+                }
+                while (b < 0 && shift < VALUE_BITS);
+                if (b < 0)
+                {
+                    throw new SofabException(SofabError.InvalidMessage, "varint overflow");
+                }
+            }
+            value = v;
+            return p - pos;
+        }
+        return ReadVarintChecked(data, pos, end, out value);
+    }
+
+    /// <summary>Per-byte checked decode for the buffer tail; 0 when incomplete.</summary>
+    private static int ReadVarintChecked(byte[] data, int pos, int end, out ulong value)
+    {
         ulong v = 0;
         int shift = 0;
         int p = pos;
@@ -510,16 +542,12 @@ public sealed class IStream
     /// <summary>Read 4 little-endian bytes at <paramref name="p"/> as an <c>int</c> bit pattern.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static int ReadInt32Le(byte[] d, int p) =>
-        (d[p] & 0xFF) | ((d[p + 1] & 0xFF) << 8) | ((d[p + 2] & 0xFF) << 16) | ((d[p + 3] & 0xFF) << 24);
+        BinaryPrimitives.ReadInt32LittleEndian(d.AsSpan(p, 4));
 
     /// <summary>Read 8 little-endian bytes at <paramref name="p"/> as a <c>long</c> bit pattern.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static long ReadInt64Le(byte[] d, int p)
-    {
-        long lo = (uint)ReadInt32Le(d, p);
-        long hi = (uint)ReadInt32Le(d, p + 4);
-        return lo | (hi << 32);
-    }
+    private static long ReadInt64Le(byte[] d, int p) =>
+        BinaryPrimitives.ReadInt64LittleEndian(d.AsSpan(p, 8));
 
     /// <summary>
     /// Feed one byte into the byte-at-a-time state machine, dispatching to the
