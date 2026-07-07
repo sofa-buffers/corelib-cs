@@ -17,8 +17,7 @@
 [GitHub repository](https://github.com/sofa-buffers/corelib-cs)
 
 A **dependency-free**, **allocation-light**, **streaming** C# implementation of
-the SofaBuffers (*Sofab*) serialization format. It is the **runtime stream core**
-— a port of the C `corelib`'s `istream.c` / `ostream.c` that runs anywhere .NET
+the SofaBuffers (*Sofab*) serialization format. It is the **runtime stream core** that runs anywhere .NET
 does, from desktops and servers to containers in the cloud.
 
 Like protobuf's `CodedInputStream` / `CodedOutputStream`, this library is meant to
@@ -26,13 +25,6 @@ be driven by **generated code**: a schema-driven generator emits one class per
 message plus marshal / unmarshal methods that call the primitives here. The
 decoder uses the **visitor pattern**, so a generated message is typically a single
 `switch` over the field id.
-
-The wire format is specified, language-neutrally, in the
-[SofaBuffers documentation](https://github.com/sofa-buffers/documentation). The
-unit tests here replay the shared, language-agnostic conformance vectors
-(`assets/test_vectors.json`, copied verbatim from the documentation repo) to
-guarantee byte-for-byte interoperability with the C, C++, Rust, Java and Go
-implementations.
 
 ### Requirements
 
@@ -45,7 +37,7 @@ implementations.
   `System.Buffers.Binary`). No reflection and no runtime code generation, so it is
   friendly to trimming and Native AOT.
 
-### Package
+### Packaging
 
 NuGet package id `SofaBuffers.Corelib`; the assembly is `SofaBuffers.dll` and the
 public API lives under the `sofab` namespace (fixed by the format spec, as in the
@@ -68,8 +60,6 @@ dotnet add package SofaBuffers.Corelib
 | Generated-code friendly | `IVisitor` has a default no-op for every field kind (a C# default-interface method), so generated (and hand-written) sinks override only what they need and ignore the rest. |
 
 ## Usage
-
-All public types are in the `sofab` namespace.
 
 ### Simple encode
 
@@ -208,6 +198,8 @@ public sealed class Point : IVisitor
 
 ## API summary
 
+All public types are in the `sofab` namespace.
+
 ### Encoding (`OStream`)
 
 `OStream` wraps a **caller-owned** `byte[]` and appends fields to it. The surface
@@ -256,14 +248,6 @@ a single call with `total == 0` and `chunkLength == 0`. Malformed input (varint
 overflow, bad type tag, out-of-range id, dangling sequence end, over-deep nesting)
 raises `SofabError.InvalidMessage`.
 
-**Allowed types.** unsigned int (`ulong`), signed int (`long`, ZigZag), bool
-(an unsigned `0`/`1` on the wire — decoded via `Unsigned`), fp32 / fp64, string
-(UTF-8, no terminator), blob, and arrays of the integer widths and of fp32 / fp64.
-The **only disallowed** array form is a *dynamic-length subtype* (`string` / `blob`)
-as a fixlen-array element — the encoder offers no such overload and the decoder
-rejects it with `SofabError.InvalidMessage` ("dynamic fixlen array element").
-Zero-count arrays are legal on both sides.
-
 ### Memory handling
 
 The library never owns a growable buffer or an intermediate message object: the
@@ -296,24 +280,9 @@ values either by value or as a **view into the caller's own input buffer**.
   *is* the message. The library holds no per-message heap state beyond the small
   `OStream` / `IStream` instances.
 
-### Supporting types
-
-`FixlenType` (`Fp32`, `Fp64`, `String`, `Blob`), `ArrayKind` (`Unsigned`,
-`Signed`, `Fixlen`), `SofabError` (`Argument`, `Usage`, `BufferFull`,
-`InvalidMessage` — the encoder / decoder actually raise `Argument`, `BufferFull`
-and `InvalidMessage`), `SofabException` (`: IOException`, carries `.Error`),
-`FlushSink` (delegate `(byte[] data, int offset, int length)`), and
-`Sofab.ApiVersion` (`== 1`).
-
 ## Feature flags
 
-**No build toggles — always the full format.** Unlike the C library's compile-time
-`SOFAB_DISABLE_*` switches (which strip whole code paths for tiny
-microcontrollers), the C# build defines no conditional-compilation constants and
-ships every field kind unconditionally: `fixlen` (fp32 / fp64, string, blob),
-`array` (unsigned / signed / fixlen arrays), `sequence` (nested scopes) and `fp64`
-are always present. The scalar value type is 64-bit (`ulong` / `long`), matching
-the C default configuration so the wire image and varint lengths are identical.
+**No build toggles — always the full format.**
 
 ## Build & test
 
