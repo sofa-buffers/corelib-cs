@@ -27,9 +27,15 @@ internal static class Program
     {
         string which = args.Length > 0 ? args[0].ToLowerInvariant() : "perf";
 
-        // Single-shot named workloads for Callgrind instruction counting.
+        // Named workloads for Callgrind instruction counting. With a rep count
+        // (`<workload> <reps>`) run that many measured ops for the two-rep-count
+        // subtraction (bench/run_callgrind.sh); without one, a single shot.
         if (Callgrind.Workloads.Contains(which))
         {
+            if (args.Length >= 2 && int.TryParse(args[1], out int reps))
+            {
+                return Callgrind.RunReps(which, reps);
+            }
             return Callgrind.Run(which);
         }
 
