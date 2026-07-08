@@ -27,7 +27,7 @@ jobs:
         # Current LTS plus the SDK the devcontainer ships.
         dotnet: ['9.0.x']
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set up .NET ${{ matrix.dotnet }}
         uses: actions/setup-dotnet@v4
@@ -49,7 +49,7 @@ jobs:
     permissions:
       contents: write   # to push the badge JSON to the `badges` branch
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set up .NET
         uses: actions/setup-dotnet@v4
