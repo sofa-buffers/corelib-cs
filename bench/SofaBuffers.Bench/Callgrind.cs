@@ -33,6 +33,80 @@ internal static class Callgrind
     internal static readonly string[] Workloads =
         { "encode_u64_array", "decode_u64_array", "encode_typical", "decode_typical" };
 
+    /// <summary>
+    /// Run <paramref name="workload"/> <paramref name="reps"/> times after a
+    /// fixed warmup, for the two-rep-count subtraction driven by
+    /// bench/run_callgrind.sh. The managed runtime JITs the hot code at runtime,
+    /// so there is no stable native symbol for Callgrind to <c>--toggle-collect</c>
+    /// on; instead the whole process is counted at two rep counts and subtracted
+    /// (<c>Ir/op = (Ir(R2) - Ir(R1))/(R2 - R1)</c>), which cancels CLR startup,
+    /// JIT and setup. The fixed warmup (independent of <paramref name="reps"/>,
+    /// so it cancels too) drives the hot methods to their final tier before the
+    /// measured loop. Prints <c>bytes=&lt;n&gt;</c> on stderr for the size column.
+    /// </summary>
+    internal static int RunReps(string workload, int reps)
+    {
+        // With tiered compilation disabled (see run_callgrind.sh) CoreCLR JITs
+        // each method to full opt on first call, so a small warmup suffices to
+        // reach steady state; it is fixed (independent of reps) so it cancels.
+        int warmup = 2_000;
+        var envW = Environment.GetEnvironmentVariable("SOFAB_WARMUP");
+        if (envW != null && int.TryParse(envW, out var w))
+        {
+            warmup = w;
+        }
+
+        int bytes;
+        Action body;
+        switch (workload)
+        {
+            case "encode_u64_array":
+            {
+                ulong[] src = MakeU64();
+                var buf = new byte[N * 11 + 16];
+                bytes = OpEncodeU64Array(buf, src);
+                body = () => Blackhole += OpEncodeU64Array(buf, src);
+                break;
+            }
+            case "decode_u64_array":
+            {
+                byte[] wire = EncodeU64();
+                bytes = wire.Length;
+                body = () => Blackhole += OpDecodeU64Array(wire);
+                break;
+            }
+            case "encode_typical":
+            {
+                var buf = new byte[256];
+                bytes = OpEncodeTypical(buf);
+                body = () => Blackhole += OpEncodeTypical(buf);
+                break;
+            }
+            case "decode_typical":
+            {
+                byte[] wire = EncodeTypical();
+                bytes = wire.Length;
+                body = () => Blackhole += OpDecodeTypical(wire);
+                break;
+            }
+            default:
+                Console.Error.WriteLine($"perf: unknown workload '{workload}'");
+                Console.Error.WriteLine("       known: " + string.Join(", ", Workloads));
+                return 2;
+        }
+
+        for (int i = 0; i < warmup; i++)
+        {
+            body();
+        }
+        for (int i = 0; i < reps; i++)
+        {
+            body();
+        }
+        Console.Error.WriteLine($"bytes={bytes} sink={Blackhole}");
+        return 0;
+    }
+
     /// <summary>Run one workload exactly once (setup outside the measured call).</summary>
     internal static int Run(string workload)
     {
