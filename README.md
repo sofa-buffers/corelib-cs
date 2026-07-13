@@ -148,6 +148,18 @@ whether a trailing `Incomplete` is a truncation for its protocol. Genuinely
 malformed input — regardless of what follows — still throws `SofabException`
 with `SofabError.InvalidMessage`.
 
+Generated decode code may also enforce receiver-side limits on unbounded
+(schema declares no `count` / `maxlen`) fields — `max_dyn_array_count`,
+`max_dyn_string_len`, `max_dyn_blob_len` caps baked in by `sofabgen`. A field
+whose wire count or total length exceeds its cap throws `SofabException` with
+`SofabError.LimitExceeded`, raised *before* any allocation and never clamped or
+truncated. This is a category deliberately **distinct** from
+`SofabError.InvalidMessage`: exceeding a configured cap is receiver *policy*, not
+wire malformation, so two peers with different caps do not read as a conformance
+divergence. This corelib enforces no limits and ships no default cap values — it
+only defines the `LimitExceeded` category so generated code reports a violation
+uniformly.
+
 ### Code generator
 
 The common case is *not* to call the primitives by hand but to let `sofabgen`
