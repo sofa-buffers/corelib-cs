@@ -131,9 +131,22 @@ var iss = new IStream();
 var sink = new My();
 byte[] chunk = new byte[16];
 int n;
+DecodeStatus status = DecodeStatus.Complete;
 while ((n = inStream.Read(chunk, 0, chunk.Length)) > 0)
-    iss.Feed(chunk, 0, n, sink);               // decode this slice
+    status = iss.Feed(chunk, 0, n, sink);      // decode this slice
+// status (also iss.Status) is Complete if the bytes ended at a field boundary,
+// or Incomplete if the stream stopped inside a field / with an open sequence.
 ```
+
+`Feed` returns a `DecodeStatus` (MESSAGE_SPEC §7). `Complete` means the bytes
+consumed so far end exactly at a field boundary — a valid message. `Incomplete`
+means they end *inside* a field (a partial varint, an unfinished string / blob /
+array payload, or a still-open nested sequence): **not** an error and **not** a
+rejection — the partial field is held and the next `Feed` resumes where it left
+off. There is no finish / finalize step: the caller owns end-of-input and decides
+whether a trailing `Incomplete` is a truncation for its protocol. Genuinely
+malformed input — regardless of what follows — still throws `SofabException`
+with `SofabError.InvalidMessage`.
 
 ### Code generator
 

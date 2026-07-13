@@ -22,6 +22,17 @@ namespace sofab;
 /// lives inside the decoder, a message may be split across any number of
 /// <c>Feed</c> calls at any byte boundary — true streaming on the input side.
 /// <para>
+/// Each <c>Feed</c> returns a <see cref="DecodeStatus"/> (also readable via
+/// <see cref="Status"/>): <see cref="DecodeStatus.Complete"/> if the bytes so far
+/// end at a field boundary, or <see cref="DecodeStatus.Incomplete"/> if they end
+/// inside a field or with an open sequence (MESSAGE_SPEC §7). Incomplete is
+/// <em>not</em> an error and is <em>not</em> a rejection — the partial field is
+/// held and resumed on the next chunk; the caller owns end-of-input and decides
+/// whether a trailing Incomplete is a truncation. Genuinely malformed input still
+/// throws <see cref="SofabException"/> (<see cref="SofabError.InvalidMessage"/>).
+/// There is no finish / finalize step.
+/// </para>
+/// <para>
 /// Unlike the C decoder there is no per-field "bind a destination" step and no
 /// explicit skip bookkeeping: an <see cref="IVisitor"/> simply ignores fields it
 /// does not care about. Scalars and floats are delivered whole; string / blob
@@ -93,12 +104,18 @@ public sealed class IStream
     /// </summary>
     /// <param name="data">encoded bytes</param>
     /// <param name="visitor">sink for decoded fields</param>
+    /// <returns>
+    /// <see cref="DecodeStatus.Complete"/> if the bytes consumed so far end at a
+    /// clean field boundary, or <see cref="DecodeStatus.Incomplete"/> if they end
+    /// inside a field or with an open sequence (MESSAGE_SPEC §7). Incomplete is
+    /// not an error — feed more bytes to continue.
+    /// </returns>
     /// <exception cref="SofabException">
     /// with <see cref="SofabError.InvalidMessage"/> on malformed input
     /// </exception>
-    public void Feed(byte[] data, IVisitor visitor)
+    public DecodeStatus Feed(byte[] data, IVisitor visitor)
     {
-        Feed(data, 0, data.Length, visitor);
+        return Feed(data, 0, data.Length, visitor);
     }
 
     /// <summary>
@@ -110,10 +127,20 @@ public sealed class IStream
     /// <param name="off">start offset</param>
     /// <param name="len">number of bytes to consume</param>
     /// <param name="visitor">sink for decoded fields</param>
+    /// <returns>
+    /// <see cref="DecodeStatus.Complete"/> if the bytes consumed so far end at a
+    /// clean field boundary (a valid message), or
+    /// <see cref="DecodeStatus.Incomplete"/> if they end <em>inside</em> a field
+    /// — a partial varint, an unfinished fixlen / array payload, or a still-open
+    /// nested sequence (MESSAGE_SPEC §7). Incomplete is not an error and not a
+    /// rejection: the decoder keeps its partial state, so feeding the next chunk
+    /// resumes exactly where this one stopped. The same value is available
+    /// afterwards via <see cref="Status"/>.
+    /// </returns>
     /// <exception cref="SofabException">
     /// with <see cref="SofabError.InvalidMessage"/> on malformed input
     /// </exception>
-    public void Feed(byte[] data, int off, int len, IVisitor visitor)
+    public DecodeStatus Feed(byte[] data, int off, int len, IVisitor visitor)
     {
         int i = off;
         int endExclusive = off + len;
@@ -169,7 +196,46 @@ public sealed class IStream
             Step(data[i] & 0xFF, visitor);
             i++;
         }
+        return Status;
     }
+
+    /// <summary>
+    /// The decode outcome for the bytes consumed so far (MESSAGE_SPEC §7): a pure
+    /// accessor that never throws and never mutates state.
+    /// </summary>
+    /// <value>
+    /// <see cref="DecodeStatus.Complete"/> when the decoder rests at a clean field
+    /// boundary — nothing buffered, no open sequence — so the bytes seen form a
+    /// valid message; otherwise <see cref="DecodeStatus.Incomplete"/>, because a
+    /// field is only partially consumed (a partial header/value varint, an
+    /// unfinished fixlen / array payload) or a nested sequence is still open.
+    /// </value>
+    /// <remarks>
+    /// This is the same value the last <see cref="Feed(byte[], IVisitor)"/>
+    /// returned; it lets a caller that fed byte-at-a-time query the outcome
+    /// without another <c>Feed</c>. Per the finish-less spec there is no finalize
+    /// step: a trailing <see cref="DecodeStatus.Incomplete"/> is a truncation the
+    /// caller interprets, not an error the decoder raises. A malformed message has
+    /// already thrown <see cref="SofabException"/> from <c>Feed</c>, so
+    /// <see cref="DecodeStatus.Invalid"/> is never observed here.
+    /// </remarks>
+    public DecodeStatus Status =>
+        AtBoundary ? DecodeStatus.Complete : DecodeStatus.Incomplete;
+
+    /// <summary>
+    /// Whether the decoder rests at a clean top-level field boundary: idle state,
+    /// no partial varint accumulated, and no open (unclosed) sequence.
+    /// </summary>
+    /// <remarks>
+    /// A non-idle <see cref="State"/> means a value/array/fixlen field is mid-parse;
+    /// a non-zero <see cref="_varintShift"/> means a header or value varint is
+    /// partially accumulated while otherwise idle; a non-zero <see cref="_depth"/>
+    /// means a <c>SEQUENCE_START</c> has no matching <c>SEQUENCE_END</c> yet. Any
+    /// of these is INCOMPLETE (§7). Mid-array parsing already implies a non-idle
+    /// state, so <see cref="_inArray"/> needs no separate check.
+    /// </remarks>
+    private bool AtBoundary =>
+        _state == State.Idle && _varintShift == 0 && _depth == 0;
 
     /// <summary>
     /// Decode one complete top-level field (or one complete array) starting at
