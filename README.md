@@ -255,11 +255,16 @@ dotnet run -c Release --project bench/SofaBuffers.Bench -- bench
 
 The managed runtime exposes no portable cycle counter, so `perf` reports CPU
 time/op (clock-independent) as the code-cost proxy alongside MB/s. For a fully
-CPU-speed-independent number, name a workload to run it once under Callgrind:
+CPU-speed-independent number, `bench/run_callgrind.sh` reports instructions
+retired per operation (Ir/op) under Callgrind:
 
 ```bash
-valgrind --tool=callgrind --collect-atstart=no \
-  --toggle-collect='*Callgrind.OpEncodeU64Array*' \
-  dotnet bench/SofaBuffers.Bench/bin/Release/net9.0/SofaBuffers.Bench.dll encode_u64_array
+bash bench/run_callgrind.sh
 # workloads: encode_u64_array, decode_u64_array, encode_typical, decode_typical
 ```
+
+Because the .NET runtime JITs the hot code at run time there is no stable native
+symbol to `--toggle-collect` on, so the script runs each workload at two rep
+counts and subtracts the whole-process instruction counts
+(`Ir/op = (Ir(R2) − Ir(R1)) / (R2 − R1)`), which cancels CLR startup, JIT and
+one-time setup exactly and leaves the pure per-op cost.
