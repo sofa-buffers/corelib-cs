@@ -47,6 +47,20 @@ public sealed class OStream
     private readonly FlushSink? _sink;
 
     /// <summary>
+    /// Strict UTF-8 codec used for <see cref="WriteString"/>. Constructed with
+    /// <c>throwOnInvalidBytes: true</c> so that an unencodable <c>string</c> — a
+    /// C# UTF-16 value containing an unpaired surrogate — raises an
+    /// <see cref="System.Text.EncoderFallbackException"/> instead of the default
+    /// <see cref="System.Text.Encoding.UTF8"/> behaviour of silently substituting
+    /// <c>U+FFFD</c>. Silent replacement would violate MESSAGE_SPEC §8 ("no silent
+    /// replacement, ever"); C# <c>string</c> is a Unicode type, so it is always
+    /// strict (CORELIB_PLAN §6.4). Valid strings encode to exactly the same bytes
+    /// as the default UTF-8 encoder.
+    /// </summary>
+    private static readonly UTF8Encoding StrictUtf8 =
+        new(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true);
+
+    /// <summary>
     /// Create an encoder over <paramref name="buffer"/> with no flush sink.
     /// Writing past the end of the buffer raises <see cref="SofabError.BufferFull"/>.
     /// </summary>
@@ -361,22 +375,39 @@ public sealed class OStream
 
     /// <summary>Write a string field (raw UTF-8 bytes, no NUL on the wire).</summary>
     /// <param name="id">field id</param>
-    /// <param name="text">string value</param>
+    /// <param name="text">string value (must be encodable as valid UTF-8)</param>
+    /// <exception cref="SofabException">
+    /// with <see cref="SofabError.Argument"/> if <paramref name="text"/> cannot be
+    /// encoded as valid UTF-8 (i.e. it contains an unpaired surrogate). Per
+    /// MESSAGE_SPEC §8 the value is refused, never silently rewritten to
+    /// <c>U+FFFD</c>. Embedded <c>U+0000</c> is valid UTF-8 and is written verbatim.
+    /// </exception>
     public void WriteString(int id, string text)
     {
         // Encode UTF-8 straight into the output buffer instead of allocating an
         // intermediate byte[] per call: measure once (vectorized), then let the
-        // runtime encoder write in place when the buffer has room.
-        int n = Encoding.UTF8.GetByteCount(text);
+        // runtime encoder write in place when the buffer has room. The strict
+        // codec throws on an unpaired surrogate rather than emitting U+FFFD, so an
+        // invalid string is rejected up front — before any header is written.
+        int n;
+        try
+        {
+            n = StrictUtf8.GetByteCount(text);
+        }
+        catch (EncoderFallbackException e)
+        {
+            throw new SofabException(SofabError.Argument, "invalid UTF-8 string: " + e.Message);
+        }
         WriteIdType(id, T_FIXLEN);
         WriteVarint(((ulong)n << 3) | (uint)FixlenType.String.Raw());
         if (_end - _offset >= n)
         {
-            _offset += Encoding.UTF8.GetBytes(text, 0, text.Length, _buffer, _offset);
+            _offset += StrictUtf8.GetBytes(text, 0, text.Length, _buffer, _offset);
             return;
         }
         // Buffer-spanning write: fall back to a temp array streamed via PushRaw.
-        byte[] bytes = Encoding.UTF8.GetBytes(text);
+        // GetByteCount above already validated, so GetBytes cannot throw here.
+        byte[] bytes = StrictUtf8.GetBytes(text);
         PushRaw(bytes, 0, bytes.Length);
     }
 
