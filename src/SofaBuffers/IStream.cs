@@ -565,7 +565,15 @@ public sealed class IStream
                 do
                 {
                     b = (sbyte)data[p++];
-                    v |= ((ulong)(b & 0x7F)) << shift;
+                    int chunk = b & 0x7F;
+                    // Reject an overlong (>64-bit) varint: any payload bit that
+                    // would spill past bit 63 makes the input malformed (§4.1/§6.3).
+                    int room = VALUE_BITS - shift;
+                    if (room < 7 && (uint)chunk >> room != 0)
+                    {
+                        throw new SofabException(SofabError.InvalidMessage, "varint overflow");
+                    }
+                    v |= ((ulong)chunk) << shift;
                     shift += 7;
                 }
                 while (b < 0 && shift < VALUE_BITS);
@@ -589,7 +597,15 @@ public sealed class IStream
         while (p < end)
         {
             int b = data[p++] & 0xFF;
-            v |= ((ulong)(b & 0x7F)) << shift;
+            int chunk = b & 0x7F;
+            // Reject an overlong (>64-bit) varint: any payload bit that would
+            // spill past bit 63 makes the input malformed (§4.1/§6.3).
+            int room = VALUE_BITS - shift;
+            if (room < 7 && (uint)chunk >> room != 0)
+            {
+                throw new SofabException(SofabError.InvalidMessage, "varint overflow");
+            }
+            v |= ((ulong)chunk) << shift;
             shift += 7;
             if ((b & 0x80) == 0)
             {
@@ -644,7 +660,17 @@ public sealed class IStream
     /// <c>false</c> if more bytes are needed</returns>
     private bool VarintPush(int b)
     {
-        _varintValue |= ((ulong)(b & 0x7F)) << _varintShift;
+        int chunk = b & 0x7F;
+        // Reject an overlong (>64-bit) varint: any payload bit that would spill
+        // past bit 63 makes the input malformed (§4.1/§6.3).
+        int room = VALUE_BITS - _varintShift;
+        if (room < 7 && (uint)chunk >> room != 0)
+        {
+            _varintValue = 0;
+            _varintShift = 0;
+            throw new SofabException(SofabError.InvalidMessage, "varint overflow");
+        }
+        _varintValue |= ((ulong)chunk) << _varintShift;
         _varintShift += 7;
 
         if ((b & 0x80) == 0)
