@@ -223,6 +223,25 @@ of the bytes stays with the caller.
   Scalars and floats are passed by value (no boxing). A visitor that retains bytes
   must copy the chunk.
 
+## Strings & UTF-8
+
+A `string` is UTF-8 text on the wire (MESSAGE_SPEC §8); `blob` is the type for
+arbitrary bytes. Because C# `string` is a Unicode (UTF-16) type it can never
+hold non-UTF-8 bytes, so SofaBuffers C# is **always strict** — there is no
+`SOFAB_STRICT_UTF8` toggle to turn off (CORELIB_PLAN §6.4: "Unicode-string
+targets are always strict").
+
+- **Encode.** `OStream.WriteString` refuses a value that cannot be encoded as
+  valid UTF-8 — i.e. one carrying an unpaired surrogate — with
+  `SofabException(SofabError.Argument)`, *before* writing any bytes. It never
+  silently substitutes `U+FFFD` the way the default `Encoding.UTF8` does; silent
+  replacement is a data mutation the spec forbids. Valid strings (including
+  embedded `U+0000`) encode to exactly the same bytes as before.
+- **Decode.** The decoder hands the raw string bytes to your visitor without
+  transcoding; generated code materializes the `string` with a strict/fatal
+  decoder, producing the `InvalidMessage` outcome on invalid UTF-8. Skipped
+  fields are never validated.
+
 ## Feature flags
 
 No build toggles — always the full format.
