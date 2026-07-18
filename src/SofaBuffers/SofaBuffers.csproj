@@ -14,7 +14,7 @@
 
     <!-- NuGet packaging metadata (org.sofabuffers parity). -->
     <PackageId>SofaBuffers.Corelib</PackageId>
-    <Version>0.1.0</Version>
+    <Version>0.8.0</Version>
     <Authors>SofaBuffers</Authors>
     <Description>Dependency-free, allocation-light, streaming C# implementation of the SofaBuffers (Sofab) serialization format.</Description>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
