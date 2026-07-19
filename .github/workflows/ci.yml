@@ -19,13 +19,19 @@ env:
 
 jobs:
   build-test:
-    name: Build & test (net9.0 + net10.0)
+    name: Build & test (${{ matrix.tfm }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        tfm: [net9.0, net10.0]
     steps:
       - uses: actions/checkout@v7
 
-      # Both runtimes must be present: the library and test project multi-target
-      # net9.0 and net10.0, so `dotnet test` runs the suite once per TFM.
+      # Both SDKs are installed in every leg even though each leg builds a
+      # single TFM: `dotnet restore` always resolves *all* TargetFrameworks in
+      # the solution, so a net9.0-only SDK could not restore the net10.0 leg.
+      # `-f` then narrows build and test to this job's framework.
       - name: Set up .NET
         uses: actions/setup-dotnet@v6
         with:
@@ -37,10 +43,10 @@ jobs:
         run: dotnet restore SofaBuffers.sln
 
       - name: Build
-        run: dotnet build SofaBuffers.sln --no-restore -c Release
+        run: dotnet build SofaBuffers.sln --no-restore -c Release -f ${{ matrix.tfm }}
 
       - name: Test
-        run: dotnet test SofaBuffers.sln --no-build -c Release --verbosity normal
+        run: dotnet test SofaBuffers.sln --no-build -c Release -f ${{ matrix.tfm }} --verbosity normal
 
   coverage:
     name: Coverage
