@@ -19,29 +19,34 @@ env:
 
 jobs:
   build-test:
-    name: Build & test (.NET ${{ matrix.dotnet }})
+    name: Build & test (${{ matrix.tfm }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        # Current LTS plus the SDK the devcontainer ships.
-        dotnet: ['9.0.x']
+        tfm: [net9.0, net10.0]
     steps:
       - uses: actions/checkout@v7
 
-      - name: Set up .NET ${{ matrix.dotnet }}
+      # Both SDKs are installed in every leg even though each leg builds a
+      # single TFM: `dotnet restore` always resolves *all* TargetFrameworks in
+      # the solution, so a net9.0-only SDK could not restore the net10.0 leg.
+      # `-f` then narrows build and test to this job's framework.
+      - name: Set up .NET
         uses: actions/setup-dotnet@v6
         with:
-          dotnet-version: ${{ matrix.dotnet }}
+          dotnet-version: |
+            9.0.x
+            10.0.x
 
       - name: Restore
         run: dotnet restore SofaBuffers.sln
 
       - name: Build
-        run: dotnet build SofaBuffers.sln --no-restore -c Release
+        run: dotnet build SofaBuffers.sln --no-restore -c Release -f ${{ matrix.tfm }}
 
       - name: Test
-        run: dotnet test SofaBuffers.sln --no-build -c Release --verbosity normal
+        run: dotnet test SofaBuffers.sln --no-build -c Release -f ${{ matrix.tfm }} --verbosity normal
 
   coverage:
     name: Coverage
@@ -54,13 +59,16 @@ jobs:
       - name: Set up .NET
         uses: actions/setup-dotnet@v6
         with:
-          dotnet-version: '9.0.x'
+          dotnet-version: |
+            9.0.x
+            10.0.x
 
       # Runs the xUnit suite and produces a Cobertura report (coverlet.collector),
       # scoped to the SofaBuffers library via coverlet.runsettings.
       - name: Test with coverage
         run: >
           dotnet test SofaBuffers.sln
+          -f net10.0
           --collect:"XPlat Code Coverage"
           --settings coverlet.runsettings
           --results-directory ./coverage-raw

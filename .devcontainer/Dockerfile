@@ -13,6 +13,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     && rm -rf /var/lib/apt/lists/*
 
+# .NET 9 runtime alongside the image's .NET 10 SDK. The library and test project
+# multi-target net9.0;net10.0, and the SDK alone cannot *run* the net9.0 test
+# host — without this, `dotnet test` aborts on the net9.0 leg.
+RUN curl -fsSL https://dot.net/v1/dotnet-install.sh -o /tmp/dotnet-install.sh \
+    && chmod +x /tmp/dotnet-install.sh \
+    && /tmp/dotnet-install.sh --runtime dotnet --channel 9.0 --install-dir /usr/share/dotnet \
+    && rm /tmp/dotnet-install.sh
+
 # Global dotnet tools — best-practice C# toolchain
 #   dotnet-format / csharpier        : formatting
 #   dotnet-outdated-tool             : dependency update checks
