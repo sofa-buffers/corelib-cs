@@ -44,6 +44,18 @@ public sealed class OStream
     private int _end;
     private int _offset;
     private int _depth;
+
+    /// <summary>
+    /// Ids of the innermost open sequences whose header has not been written yet
+    /// (MESSAGE_SPEC §2 lazy framing). Always a contiguous suffix of the open
+    /// sequences: writing any field commits the whole run at once, so
+    /// <see cref="WriteSequenceEnd"/> can simply pop the last entry.
+    /// </summary>
+    private readonly int[] _pending = new int[LAZY_SEQ_DEPTH];
+
+    /// <summary>Number of valid entries in <see cref="_pending"/>.</summary>
+    private int _nPending;
+
     private readonly FlushSink? _sink;
 
     /// <summary>
@@ -254,6 +266,14 @@ public sealed class OStream
     /// </summary>
     /// <param name="id">field id (<c>0..ID_MAX</c>)</param>
     /// <param name="wireType">3-bit wire-type tag (one of the <c>T_*</c> constants)</param>
+    /// <remarks>
+    /// This is the single choke point every field write in this class passes
+    /// through — scalar, fixlen, float, both array kinds, blob and string all
+    /// reach the wire via it — so it is also where a held-back sequence run is
+    /// committed: the field about to be written is content, which means every
+    /// enclosing sequence is non-default and must be framed after all
+    /// (MESSAGE_SPEC §2).
+    /// </remarks>
     /// <exception cref="SofabException">
     /// with <see cref="SofabError.Argument"/> if <paramref name="id"/> is out of range
     /// </exception>
@@ -263,7 +283,26 @@ public sealed class OStream
         {
             throw new SofabException(SofabError.Argument, "id " + id);
         }
+        if (_nPending != 0 && wireType != T_SEQUENCE_START && wireType != T_SEQUENCE_END)
+        {
+            CommitPending();
+        }
         WriteVarint(((ulong)id << 3) | (uint)wireType);
+    }
+
+    /// <summary>Write out the held-back sequence headers, outermost first.</summary>
+    /// <remarks>
+    /// Runs at most once per non-default sequence, never once per field, so it is
+    /// kept off the inlined fast path of <see cref="WriteIdType"/>.
+    /// </remarks>
+    private void CommitPending()
+    {
+        int n = _nPending;
+        _nPending = 0;
+        for (int i = 0; i < n; i++)
+        {
+            WriteVarint(((ulong)_pending[i] << 3) | T_SEQUENCE_START);
+        }
     }
 
     // --- scalar writers -----------------------------------------------------
@@ -727,28 +766,129 @@ public sealed class OStream
     // --- sequence writers ---------------------------------------------------
 
     /// <summary>
-    /// Open a nested sequence with the given field <paramref name="id"/>. Fields
-    /// written until the matching <see cref="WriteSequenceEnd"/> belong to the
-    /// sequence and form a fresh id scope.
+    /// Open a nested sequence whose header is <b>held back</b> until the sequence
+    /// turns out to have content. Fields written until the matching
+    /// <see cref="WriteSequenceEnd"/> / <see cref="WriteSequenceEndKeep"/> belong
+    /// to the sequence and form a fresh id scope.
     /// </summary>
+    /// <remarks>
+    /// MESSAGE_SPEC §2 omits a sequence-typed field whose value equals its declared
+    /// default, and "not one child was written" is exactly that condition —
+    /// evaluated per child field, recursively, for free. A sequence closed with
+    /// nothing in it therefore emits <b>nothing</b> instead of a two-byte empty
+    /// frame, and an all-default message becomes the empty byte string.
+    /// <para>
+    /// The predicate never touches a byte image of the object, so struct padding
+    /// cannot influence it and a non-zero nested default is handled by the caller's
+    /// ordinary per-field test.
+    /// </para>
+    /// <para>
+    /// Held-back ids are encoder <i>state</i>, not buffer content, so a flush can
+    /// never split a pending run: an output buffer far smaller than the message
+    /// produces exactly the one-shot bytes.
+    /// </para>
+    /// <para>
+    /// This is the only way to open a sequence. How it closes decides whether a
+    /// contentless one survives: <see cref="WriteSequenceEnd"/> drops it,
+    /// <see cref="WriteSequenceEndKeep"/> forces the frame out.
+    /// </para>
+    /// </remarks>
     /// <param name="id">field id of the sequence</param>
     /// <exception cref="SofabException">
     /// with <see cref="SofabError.Argument"/> if opening this sequence would nest
-    /// deeper than <c>MAX_DEPTH</c> (255) levels
+    /// deeper than <c>MAX_DEPTH</c> (255) levels, or if <paramref name="id"/> is
+    /// out of range
     /// </exception>
-    public void WriteSequenceBegin(int id)
+    public void WriteSequenceBeginLazy(int id)
     {
         if (_depth >= MAX_DEPTH)
         {
             throw new SofabException(SofabError.Argument, "sequence too deep");
         }
-        WriteIdType(id, T_SEQUENCE_START);
+        if (id < 0 || id > ID_MAX)
+        {
+            throw new SofabException(SofabError.Argument, "id " + id);
+        }
+        if (_nPending < LAZY_SEQ_DEPTH)
+        {
+            _pending[_nPending++] = id;
+        }
+        else
+        {
+            // Deeper than the hold-back window: commit the whole run first and
+            // frame this one eagerly, which keeps "pending is a contiguous suffix
+            // of the open sequences" true — otherwise WriteSequenceEnd would pop
+            // an ancestor instead of writing this frame's end marker. Valid, just
+            // not canonical if this sequence turns out to be all-default.
+            CommitPending();
+            WriteVarint(((ulong)id << 3) | T_SEQUENCE_START);
+        }
         _depth++;
     }
 
-    /// <summary>Close the most recently opened nested sequence.</summary>
+    /// <summary>
+    /// Close the most recently opened nested sequence, letting it <b>vanish</b> if
+    /// it received no content.
+    /// </summary>
+    /// <remarks>
+    /// Use it wherever absence encodes the same value as an empty frame: a
+    /// <c>struct</c>/<c>union</c> field, and an array field whose declared
+    /// <c>default</c> is the empty collection (MESSAGE_SPEC §2). Where the frame
+    /// must be visible, close with <see cref="WriteSequenceEndKeep"/> instead.
+    /// </remarks>
     public void WriteSequenceEnd()
     {
+        if (_nPending != 0)
+        {
+            // The innermost open sequence is the last held-back one: drop it,
+            // header and end marker both.
+            _nPending--;
+            if (_depth > 0)
+            {
+                _depth--;
+            }
+            return;
+        }
+        WriteIdType(0, T_SEQUENCE_END);
+        if (_depth > 0)
+        {
+            _depth--;
+        }
+    }
+
+    /// <summary>
+    /// Close the most recently opened nested sequence, <b>keeping</b> its frame
+    /// even when it received no content.
+    /// </summary>
+    /// <remarks>
+    /// Behaves like a write: it first emits any held-back headers — this frame's
+    /// and every enclosing one's — and then the end marker, so an empty sequence
+    /// still reaches the wire as <c>begin</c> + <c>end</c>.
+    /// <para>
+    /// Required wherever the frame carries information beyond its contents:
+    /// </para>
+    /// <list type="bullet">
+    /// <item><description>a <b>wrapper-array element</b> (<c>struct</c>/<c>union</c>/nested row):
+    /// element presence is what carries a dynamic array's length — <i>highest
+    /// present id + 1</i> (MESSAGE_SPEC §5.1) — so dropping an all-default element
+    /// would change the decoded length, not just the bytes;</description></item>
+    /// <item><description>an array field already known to <b>differ from a non-empty declared
+    /// <c>default</c></b>: absence would reconstruct that default, so the empty
+    /// frame is the only encoding of "explicitly empty" (§2, §3).</description></item>
+    /// </list>
+    /// <para>
+    /// The two failure directions are not symmetric, which is why this is the safe
+    /// choice when in doubt: using it where <see cref="WriteSequenceEnd"/> would do
+    /// costs one non-canonical empty frame that a decoder normalizes away, while
+    /// the reverse silently changes an array's length.
+    /// </para>
+    /// </remarks>
+    public void WriteSequenceEndKeep()
+    {
+        if (_nPending != 0)
+        {
+            CommitPending();
+        }
         WriteIdType(0, T_SEQUENCE_END);
         if (_depth > 0)
         {

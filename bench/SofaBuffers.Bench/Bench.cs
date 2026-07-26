@@ -57,7 +57,7 @@ internal static class Bench
         os.WriteFp32(4, 3.14159f);
         os.WriteString(5, "sofab");
         os.WriteArrayUnsigned(6, new ushort[] { 10, 20, 30, 40 });
-        os.WriteSequenceBegin(7);
+        os.WriteSequenceBeginLazy(7);
         os.WriteUnsigned(1, 99);
         os.WriteSigned(2, -7);
         os.WriteSequenceEnd();

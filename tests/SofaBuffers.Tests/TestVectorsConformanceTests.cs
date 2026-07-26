@@ -145,8 +145,14 @@ public class TestVectorsConformanceTests
                 case "string": os.WriteString(Id(f), f.GetProperty("value").GetString()!); break;
                 case "blob": os.WriteBlob(Id(f), Convert.FromHexString(f.GetProperty("value_hex").GetString()!)); break;
                 case "array": ReplayArray(os, f); break;
-                case "sequence_begin": os.WriteSequenceBegin(Id(f)); break;
-                case "sequence_end": os.WriteSequenceEnd(); break;
+                case "sequence_begin": os.WriteSequenceBeginLazy(Id(f)); break;
+                // The vectors' `serialized` hex is the DENSE image: every frame a
+                // vector names is on the wire, empty ones included. Replaying is
+                // raw-encoder work with no schema behind it, so the closer that
+                // reproduces that image is the frame-keeping one -- WriteSequenceEnd
+                // would drop the three empty-sequence vectors to zero bytes
+                // (MESSAGE_SPEC §2; the omitted form is `serialized_sparse`).
+                case "sequence_end": os.WriteSequenceEndKeep(); break;
                 default: throw new InvalidOperationException("unknown op " + f.GetProperty("op").GetString());
             }
         }

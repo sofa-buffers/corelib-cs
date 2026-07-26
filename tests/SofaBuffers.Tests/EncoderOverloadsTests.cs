@@ -244,9 +244,9 @@ public class EncoderOverloadsTests
         var os = new OStream(new byte[1024]);
         for (int i = 0; i < 255; i++)
         {
-            os.WriteSequenceBegin(0); // 255 levels open fine
+            os.WriteSequenceBeginLazy(0); // 255 levels open fine
         }
-        var ex = Assert.Throws<SofabException>(() => os.WriteSequenceBegin(0)); // 256th rejected
+        var ex = Assert.Throws<SofabException>(() => os.WriteSequenceBeginLazy(0)); // 256th rejected
         Assert.Equal(SofabError.Argument, ex.Error);
     }
 

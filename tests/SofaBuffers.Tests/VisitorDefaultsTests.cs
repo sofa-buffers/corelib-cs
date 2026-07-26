@@ -33,7 +33,7 @@ public class VisitorDefaultsTests
         os.WriteArrayUnsigned(8, new uint[] { 1, 2 });
         os.WriteArraySigned(9, new int[] { -1, -2 });
         os.WriteArrayFp64(10, new double[] { 1.0, 2.0 });
-        os.WriteSequenceBegin(11);
+        os.WriteSequenceBeginLazy(11);
         os.WriteUnsigned(1, 7);
         os.WriteSequenceEnd();
         int used = os.BytesUsed;

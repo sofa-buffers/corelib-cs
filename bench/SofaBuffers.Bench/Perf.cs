@@ -72,7 +72,7 @@ internal static class Perf
         os.WriteArrayUnsigned(9, PerfSamples);
         os.WriteArraySigned(10, PerfDeltas);
         os.WriteArrayFp64(11, PerfFp64);
-        os.WriteSequenceBegin(12);
+        os.WriteSequenceBeginLazy(12);
         os.WriteUnsigned(1, 99);
         os.WriteSigned(2, -7);
         os.WriteSequenceEnd();

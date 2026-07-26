@@ -130,9 +130,9 @@ public class RoundTripTests
         Capture c = Roundtrip(os =>
         {
             os.WriteUnsigned(1, 1);
-            os.WriteSequenceBegin(2);
+            os.WriteSequenceBeginLazy(2);
             os.WriteUnsigned(1, 2);
-            os.WriteSequenceBegin(3);
+            os.WriteSequenceBeginLazy(3);
             os.WriteUnsigned(1, 3);
             os.WriteSequenceEnd();
             os.WriteSequenceEnd();
