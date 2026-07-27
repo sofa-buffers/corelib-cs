@@ -51,10 +51,28 @@ public sealed class OStream
     /// sequences: writing any field commits the whole run at once, so
     /// <see cref="WriteSequenceEnd"/> can simply pop the last entry.
     /// </summary>
-    private readonly int[] _pending = new int[LAZY_SEQ_DEPTH];
+    /// <remarks>
+    /// The run is <b>unbounded</b>: CORELIB_PLAN §6 requires an implementation that
+    /// can allocate to hold back to the full <c>MAX_DEPTH</c>, so this encoder is
+    /// canonical at every depth the format permits. Only a heap-free profile may
+    /// bound the run and frame eagerly past the bound; C# is not one, so there is
+    /// no eager fallback and no depth constant to configure.
+    /// <para>
+    /// Allocated lazily on the first held-back header and grown by doubling, so an
+    /// encoder that never opens a sequence — the common flat message — pays
+    /// nothing for it. <c>MAX_DEPTH</c> caps the growth at 255 entries.
+    /// </para>
+    /// </remarks>
+    private int[]? _pending;
 
     /// <summary>Number of valid entries in <see cref="_pending"/>.</summary>
     private int _nPending;
+
+    /// <summary>
+    /// Entries the pending run allocates on its first held-back header. Deeper
+    /// nesting doubles it; real schemas rarely reach even this.
+    /// </summary>
+    private const int InitialPendingCapacity = 8;
 
     private readonly FlushSink? _sink;
 
@@ -297,11 +315,13 @@ public sealed class OStream
     /// </remarks>
     private void CommitPending()
     {
+        // Only reached with _nPending != 0, which implies the array exists.
+        int[] pending = _pending!;
         int n = _nPending;
         _nPending = 0;
         for (int i = 0; i < n; i++)
         {
-            WriteVarint(((ulong)_pending[i] << 3) | T_SEQUENCE_START);
+            WriteVarint(((ulong)pending[i] << 3) | T_SEQUENCE_START);
         }
     }
 
@@ -788,6 +808,13 @@ public sealed class OStream
     /// produces exactly the one-shot bytes.
     /// </para>
     /// <para>
+    /// The hold-back reaches the full <c>MAX_DEPTH</c> (255): the pending run grows
+    /// on demand, so this encoder emits the canonical §2 bytes at <i>every</i>
+    /// nesting depth the format allows. CORELIB_PLAN §6 permits a bounded run —
+    /// framing eagerly and non-canonically past the bound — only for a heap-free
+    /// profile, which C# is not.
+    /// </para>
+    /// <para>
     /// This is the only way to open a sequence. How it closes decides whether a
     /// contentless one survives: <see cref="WriteSequenceEnd"/> drops it,
     /// <see cref="WriteSequenceEndKeep"/> forces the frame out.
@@ -809,20 +836,19 @@ public sealed class OStream
         {
             throw new SofabException(SofabError.Argument, "id " + id);
         }
-        if (_nPending < LAZY_SEQ_DEPTH)
+        // Grow on demand — the run reaches as deep as the nesting does, so there is
+        // no depth at which a sequence gets framed eagerly and no fallback path
+        // that could break "pending is a contiguous suffix of the open sequences".
+        // MAX_DEPTH above already caps this at 255 entries.
+        if (_pending == null)
         {
-            _pending[_nPending++] = id;
+            _pending = new int[InitialPendingCapacity];
         }
-        else
+        else if (_nPending == _pending.Length)
         {
-            // Deeper than the hold-back window: commit the whole run first and
-            // frame this one eagerly, which keeps "pending is a contiguous suffix
-            // of the open sequences" true — otherwise WriteSequenceEnd would pop
-            // an ancestor instead of writing this frame's end marker. Valid, just
-            // not canonical if this sequence turns out to be all-default.
-            CommitPending();
-            WriteVarint(((ulong)id << 3) | T_SEQUENCE_START);
+            Array.Resize(ref _pending, _pending.Length * 2);
         }
+        _pending[_nPending++] = id;
         _depth++;
     }
 

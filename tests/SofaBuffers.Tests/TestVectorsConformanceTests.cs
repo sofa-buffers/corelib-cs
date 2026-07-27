@@ -74,6 +74,26 @@ public class TestVectorsConformanceTests
 
     private static readonly Dictionary<string, Vector> Vectors = Load();
 
+    /// <summary>
+    /// Loads the shared vectors. Every assertion in this file is against the
+    /// <c>serialized</c> column — the primitive-layer ground truth: the exact
+    /// bytes for the given sequence of field-write ops, which is precisely what
+    /// this repo implements.
+    /// </summary>
+    /// <remarks>
+    /// The vectors also carry a <c>serialized_sparse</c> column (the MESSAGE_SPEC
+    /// §2 form: every field equal to its declared default omitted, including a
+    /// sequence-typed field that turns out all-default). <b>Nothing here reads it,
+    /// and nothing here could:</b> producing that form requires knowing each
+    /// field's declared default, which lives in a schema — and this corelib has no
+    /// message layer, it writes the ops it is handed. <c>serialized_sparse</c> is
+    /// exercised by the <i>generator's</i> conformance drivers, which generate
+    /// typed message classes from a schema and compare each field against its
+    /// default (sofa-buffers/generator,
+    /// <c>tests/conformance/csharp/check_vectors.py</c>). Do not add a test for it
+    /// here: it could only re-encode defaults hard-coded in the test, asserting
+    /// the test's own arithmetic rather than the library's behaviour.
+    /// </remarks>
     private static Dictionary<string, Vector> Load()
     {
         string path = Path.Combine(AppContext.BaseDirectory, "test_vectors.json");

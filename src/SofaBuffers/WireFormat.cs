@@ -62,16 +62,6 @@ internal static class WireFormat
     internal const int VALUE_BITS = 64;
 
     /// <summary>
-    /// How many nested sequence headers the encoder can hold back at once (see
-    /// <c>OStream.WriteSequenceBeginLazy</c>). A run nested deeper than this is
-    /// framed eagerly: still valid, just not canonical — an all-default sequence
-    /// below that depth keeps its empty frame, which a decoder accepts and
-    /// normalizes away (MESSAGE_SPEC §2). Sized for real schemas rather than the
-    /// format's <see cref="MAX_DEPTH"/> ceiling so the encoder stays small.
-    /// </summary>
-    internal const int LAZY_SEQ_DEPTH = 32;
-
-    /// <summary>
     /// ZigZag-encode a signed value to its unsigned varint representation.
     /// </summary>
     /// <param name="v">signed value</param>

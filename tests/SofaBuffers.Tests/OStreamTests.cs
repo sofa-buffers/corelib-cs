@@ -326,54 +326,140 @@ public class OStreamTests
     }
 
     /// <summary>
-    /// Held-back headers are encoder state, not buffer content, so a flush can
-    /// never split a pending run: a 3-byte output buffer -- far smaller than the
-    /// message -- sees exactly the bytes a one-shot buffer does.
+    /// A pending run committed <i>across</i> a flush boundary yields exactly the
+    /// bytes of the one-shot encode: a 3-byte output buffer flushes in the middle
+    /// of this message and the result is byte-identical.
     /// </summary>
+    /// <remarks>
+    /// Note what this can <b>not</b> test: a flush landing while a header is still
+    /// held back is unreachable by construction. Held-back ids are encoder state,
+    /// so they occupy no buffer space, and the buffer only fills through a write --
+    /// which commits the whole run before its first byte reaches the buffer. A
+    /// pending run therefore can never straddle a flush; what a tiny buffer does
+    /// exercise is the already-committed bytes being split across flushes, which
+    /// is what this asserts.
+    /// </remarks>
     [Fact]
-    public void LazyFramingIsBufferSizeIndependent()
+    public void RunCommittedAcrossAFlushBoundaryMatchesTheOneShotBytes()
     {
+        static void Body(OStream os)
+        {
+            os.WriteSequenceBeginLazy(1);
+            os.WriteSequenceBeginLazy(2);
+            os.WriteSequenceEnd();
+            os.WriteUnsigned(0, 42);
+            os.WriteSequenceEnd();
+        }
+
         var produced = new System.IO.MemoryStream();
         var os = new OStream(new byte[3], 0, (d, o, l) => produced.Write(d, o, l));
-        os.WriteSequenceBeginLazy(1);
-        os.WriteSequenceBeginLazy(2);
-        os.WriteSequenceEnd();
-        os.WriteUnsigned(0, 42);
-        os.WriteSequenceEnd();
+        Body(os);
         os.Flush();
+
         Assert.Equal(Bytes(0x0E, 0x00, 0x2A, 0x07), produced.ToArray());
+        Assert.Equal(Encode(Body), produced.ToArray());
     }
 
     /// <summary>
-    /// Past the hold-back window a sequence is framed eagerly, but only after the
-    /// whole pending run is committed -- so "pending is a contiguous suffix of the
-    /// open sequences" still holds and the matching <c>WriteSequenceEnd</c> writes
-    /// this frame's end marker instead of popping an ancestor.
+    /// The exact byte sequence the README's "Nested sequences" example claims.
+    /// Documented bytes are easy to get wrong by hand (an id is shifted three bits
+    /// left before the tag is or-ed in), so they are pinned here rather than
+    /// trusted.
     /// </summary>
     [Fact]
-    public void LazyWindowExhaustedFramesEagerlyAndStaysBalanced()
+    public void ReadmeNestedSequencesExample()
     {
-        // 33 nested sequences: the first 32 are held back, the 33rd exhausts the
-        // window and is framed eagerly (committing the 32 ahead of it). Closing
-        // all 33 with the dropping closer must still leave 33 balanced frames.
-        byte[] wire = Encode(os =>
+        Assert.Equal(Bytes(0x26, 0x09, 0x05, 0x07, 0x06, 0x07), Encode(os =>
         {
-            for (int i = 0; i < 33; i++)
+            os.WriteSequenceBeginLazy(4);
+            os.WriteSigned(1, -3);
+            os.WriteSequenceEnd();
+
+            os.WriteSequenceBeginLazy(5);
+            os.WriteSequenceEnd();
+
+            os.WriteSequenceBeginLazy(0);
+            os.WriteSequenceEndKeep();
+        }));
+    }
+
+    /// <summary>
+    /// Nesting far deeper than the 32-level window this encoder used to have, and
+    /// closing every level contentless, still emits <b>zero</b> bytes -- precisely
+    /// what the old eager fallback got wrong. CORELIB_PLAN §6 requires an
+    /// implementation that can allocate to hold back to the full <c>MAX_DEPTH</c>,
+    /// so the pending run grows instead of framing eagerly past a bound.
+    /// </summary>
+    [Fact]
+    public void DeepNestingClosedContentlessEmitsNothing()
+    {
+        Assert.Equal(Array.Empty<byte>(), Encode(os =>
+        {
+            for (int i = 0; i < 40; i++)
             {
                 os.WriteSequenceBeginLazy(1);
             }
-            for (int i = 0; i < 33; i++)
+            for (int i = 0; i < 40; i++)
+            {
+                os.WriteSequenceEnd();
+            }
+        }));
+    }
+
+    /// <summary>
+    /// The hold-back reaches the format's ceiling: <c>MAX_DEPTH</c> (255) nested
+    /// sequences closed contentless emit nothing, and the same nesting with a
+    /// single leaf at the bottom commits all 255 headers outermost-first -- so the
+    /// run is still a contiguous suffix of the open sequences at maximum depth.
+    /// </summary>
+    [Fact]
+    public void HoldBackReachesMaxDepth()
+    {
+        const int MaxDepth = 255;
+
+        static byte[] EncodeBig(Action<OStream> body)
+        {
+            var buf = new byte[4096];
+            var os = new OStream(buf);
+            body(os);
+            var outp = new byte[os.BytesUsed];
+            Array.Copy(buf, outp, os.BytesUsed);
+            return outp;
+        }
+
+        Assert.Equal(Array.Empty<byte>(), EncodeBig(os =>
+        {
+            for (int i = 0; i < MaxDepth; i++)
+            {
+                os.WriteSequenceBeginLazy(1);
+            }
+            for (int i = 0; i < MaxDepth; i++)
+            {
+                os.WriteSequenceEnd();
+            }
+        }));
+
+        byte[] wire = EncodeBig(os =>
+        {
+            for (int i = 0; i < MaxDepth; i++)
+            {
+                os.WriteSequenceBeginLazy(1);
+            }
+            os.WriteUnsigned(0, 42);
+            for (int i = 0; i < MaxDepth; i++)
             {
                 os.WriteSequenceEnd();
             }
         });
 
-        var expected = new byte[66];
-        for (int i = 0; i < 33; i++)
+        var expected = new byte[MaxDepth + 2 + MaxDepth];
+        for (int i = 0; i < MaxDepth; i++)
         {
-            expected[i] = 0x0E;      // sequence start, id 1
-            expected[33 + i] = 0x07; // sequence end
+            expected[i] = 0x0E;                 // sequence start, id 1
+            expected[MaxDepth + 2 + i] = 0x07;  // sequence end
         }
+        expected[MaxDepth] = 0x00;              // the leaf: unsigned, id 0
+        expected[MaxDepth + 1] = 0x2A;          // value 42
         Assert.Equal(expected, wire);
     }
 
