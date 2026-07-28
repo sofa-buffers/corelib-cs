@@ -97,6 +97,50 @@ for (int i = 0; i < 1000; i++)
 os.Flush();                                    // push the tail
 ```
 
+### Nested sequences
+
+A sequence (a nested struct/union, or an array of variable-size elements) is
+opened with `WriteSequenceBeginLazy` and closed with one of two closers. The
+header is **held back** until the sequence turns out to have content, so a
+sequence closed with nothing in it emits nothing at all — which is exactly
+MESSAGE_SPEC §2's rule that a sequence-typed field equal to its declared default
+is omitted rather than framed empty. Nothing is buffered: the held-back ids are
+encoder state, so a tiny output buffer still produces the one-shot bytes. The
+hold-back reaches the format's full `MAX_DEPTH` (255) — the pending run grows on
+demand, so the encoding is canonical at every nesting depth.
+
+```csharp
+os.WriteSequenceBeginLazy(4);
+os.WriteSigned(1, -3);         // 26 — the first child commits the held-back header,
+                               // 09 05 — then the child itself (id 1, zigzag(-3) = 5)
+os.WriteSequenceEnd();         // 07 — the frame is on the wire
+
+os.WriteSequenceBeginLazy(5);
+os.WriteSequenceEnd();         // nothing: header and end marker both dropped
+
+os.WriteSequenceBeginLazy(0);
+os.WriteSequenceEndKeep();     // 06 07 — the frame is forced out even when empty
+```
+
+Those seven calls produce exactly `26 09 05 07 06 07` — six bytes, with the whole
+middle sequence gone. (Byte-for-byte asserted by `ReadmeNestedSequencesExample`
+in the encoder test suite.)
+
+Which closer to use is a static property of the position in the schema, not of
+the value:
+
+| position | closer |
+|---|---|
+| `struct` / `union` field | `WriteSequenceEnd` |
+| array field (the wrapper) | `WriteSequenceEnd` |
+| wrapper-array **element** (`struct`/`union`/nested row) | `WriteSequenceEndKeep` |
+| array field known to differ from a **non-empty** declared `default` | `WriteSequenceEndKeep` |
+
+`WriteSequenceEndKeep` is the safe default when a call site is ambiguous: using
+it where `WriteSequenceEnd` would do costs one non-canonical empty frame that
+every decoder normalizes away, while the reverse drops an array element and
+silently changes the decoded array's **length** (§5.1).
+
 ### Deserialize
 
 The decoder pushes each decoded field to your `IVisitor`; override only the kinds

@@ -130,14 +130,43 @@ public class RoundTripTests
         Capture c = Roundtrip(os =>
         {
             os.WriteUnsigned(1, 1);
-            os.WriteSequenceBegin(2);
+            os.WriteSequenceBeginLazy(2);
             os.WriteUnsigned(1, 2);
-            os.WriteSequenceBegin(3);
+            os.WriteSequenceBeginLazy(3);
             os.WriteUnsigned(1, 3);
             os.WriteSequenceEnd();
             os.WriteSequenceEnd();
         });
         Assert.Equal(new[] { "seq{2", "seq{3", "seq}", "seq}" }, c.SeqEvents);
         Assert.Equal(new ulong[] { 1UL, 2UL, 3UL }, c.Unsigneds);
+    }
+
+    /// <summary>
+    /// MESSAGE_SPEC §2 at the top level: a message whose every field equals its
+    /// declared default writes nothing at all, and that <b>zero-length</b> byte
+    /// string is itself a valid, <c>COMPLETE</c> message carrying no fields.
+    /// Encode and decode are asserted as one round trip so the empty encoding
+    /// cannot drift away from what the decoder accepts.
+    /// </summary>
+    [Fact]
+    public void AllDefaultMessageIsTheEmptyByteString()
+    {
+        var os = new OStream(new byte[16]);
+        // Every field is at its default: the scalars are simply never written and
+        // the nested struct is opened lazily, then closed contentless.
+        os.WriteSequenceBeginLazy(1);
+        os.WriteSequenceBeginLazy(2);
+        os.WriteSequenceEnd();
+        os.WriteSequenceEnd();
+        Assert.Equal(0, os.BytesUsed);
+
+        var c = new Capture();
+        var iss = new IStream();
+        Assert.Equal(DecodeStatus.Complete, iss.Feed(Array.Empty<byte>(), c));
+        Assert.Equal(DecodeStatus.Complete, iss.Status);
+        Assert.Empty(c.SeqEvents);
+        Assert.Empty(c.Unsigneds);
+        Assert.Empty(c.Signeds);
+        Assert.Empty(c.Strings);
     }
 }
