@@ -191,7 +191,7 @@ public class EncoderOverloadsTests
         sink = new ArraySink();
         new IStream().Feed(buf, 0, os.BytesUsed, sink);
         Assert.Equal(1, sink.Begins);
-        Assert.Equal(ArrayKind.Fixlen, sink.LastKind);
+        Assert.Equal(ArrayKind.Fp32, sink.LastKind);
         Assert.Equal(0, sink.LastCount);
         Assert.Equal(0, sink.Elements);
 
@@ -206,7 +206,7 @@ public class EncoderOverloadsTests
         sink = new ArraySink();
         new IStream().Feed(buf, 0, os.BytesUsed, sink);
         Assert.Equal(1, sink.Begins);
-        Assert.Equal(ArrayKind.Fixlen, sink.LastKind);
+        Assert.Equal(ArrayKind.Fp64, sink.LastKind);
         Assert.Equal(0, sink.LastCount);
         Assert.Equal(0, sink.Elements);
     }
