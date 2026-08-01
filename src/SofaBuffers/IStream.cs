@@ -82,6 +82,13 @@ public sealed class IStream
     private ArrayKind _arrayKind = ArrayKind.Unsigned;
     private int _arrayRemaining;
     private bool _inArray;
+    // Wire type 0b101 (fixlen array): the element subtype is only known once the
+    // fixlen_word has been read, so _arrayKind is not yet meaningful and the
+    // ArrayBegin hook has not fired. Set between the header and the word.
+    private bool _arrayFixlen;
+    // The array's element count, kept across the fixlen_word so the deferred
+    // ArrayBegin can still report it (_arrayRemaining is decremented per element).
+    private int _arrayCount;
 
     // fixlen context
     private FixlenType _fixlenType = FixlenType.Fp32;
@@ -459,20 +466,24 @@ public sealed class IStream
         }
         p += n;
         int remaining = (int)count;
-        visitor.ArrayBegin(id, ArrayKind.Fixlen, remaining);
 
         // Single type+length header for the whole array. A fixlen array always
         // carries its fixlen_word, even when empty (§4.8): the header is read and
         // validated here, and the payload loop below simply runs zero times.
+        // ArrayBegin deliberately has NOT fired yet — §4.8 fixes the order as
+        // count word, format ceiling, fixlen_word, then the hook, so the receiver
+        // learns the element subtype (fp32 vs fp64) before it judges the field.
         int hn = ReadVarint(data, p, end, out ulong lenHeader);
         if (hn == 0)
         {
             // Header split across the Feed boundary: resume reading it in the
-            // byte machine's FixlenLen state.
+            // byte machine's FixlenLen state, which fires ArrayBegin once the
+            // word is complete.
             _id = id;
             _inArray = true;
-            _arrayKind = ArrayKind.Fixlen;
+            _arrayFixlen = true;
             _arrayRemaining = remaining;
+            _arrayCount = remaining;
             _accLen = 0;
             _state = State.FixlenLen;
             return p - start;
@@ -487,6 +498,7 @@ public sealed class IStream
         int length = (int)lengthValue;
 
         int need;
+        ArrayKind kind;
         if (subtype == FixlenType.Fp32)
         {
             if (length != 4)
@@ -494,6 +506,7 @@ public sealed class IStream
                 throw new SofabException(SofabError.InvalidMessage, "fp32 length " + length);
             }
             need = 4;
+            kind = ArrayKind.Fp32;
         }
         else if (subtype == FixlenType.Fp64)
         {
@@ -502,13 +515,20 @@ public sealed class IStream
                 throw new SofabException(SofabError.InvalidMessage, "fp64 length " + length);
             }
             need = 8;
+            kind = ArrayKind.Fp64;
         }
         else
         {
-            // String/blob are not valid as fixlen-array elements.
+            // String/blob are not valid as fixlen-array elements. §4.8 allows only
+            // fixed-width subtypes here, so this is a FORMAT violation judged
+            // before the hook fires -- never a §7.3 schema-mismatch skip.
             throw new SofabException(SofabError.InvalidMessage, "dynamic fixlen array element");
         }
         p += hn;
+
+        // The subtype is now known and legal: announce the array. A zero-count
+        // array still gets exactly this one call, with the correct kind.
+        visitor.ArrayBegin(id, kind, remaining);
 
         while (remaining > 0)
         {
@@ -518,7 +538,8 @@ public sealed class IStream
                 // element in the byte machine's FixlenVal state.
                 _id = id;
                 _inArray = true;
-                _arrayKind = ArrayKind.Fixlen;
+                _arrayFixlen = false; // the word is behind us; the hook has fired
+                _arrayKind = kind;
                 _arrayRemaining = remaining;
                 _fixlenType = subtype;
                 _fixlenTotal = need;
@@ -712,6 +733,7 @@ public sealed class IStream
         }
         _id = (int)idValue;
         _inArray = false;
+        _arrayFixlen = false;
 
         switch (wireType)
         {
@@ -733,7 +755,9 @@ public sealed class IStream
                 _state = State.ArrayCount;
                 break;
             case T_FIXLENARRAY:
-                _arrayKind = ArrayKind.Fixlen;
+                // _arrayKind stays unset: fp32 vs fp64 is only decided by the
+                // fixlen_word, which follows the count word (§4.8).
+                _arrayFixlen = true;
                 _state = State.ArrayCount;
                 break;
             case T_SEQUENCE_START:
@@ -812,6 +836,8 @@ public sealed class IStream
     /// zero-length string/blob is emitted immediately as an empty chunk; a
     /// non-empty string/blob transitions to <c>FixlenRaw</c> for chunked streaming.
     /// String/blob sub-types are rejected when reached as a fixlen-array element.
+    /// For a fixlen array this is also where <see cref="IVisitor.ArrayBegin"/>
+    /// fires, once the validated word has named the element subtype (§4.8).
     /// </summary>
     /// <param name="b">the next input byte</param>
     /// <param name="visitor">sink for decoded fields</param>
@@ -842,6 +868,7 @@ public sealed class IStream
                 {
                     throw new SofabException(SofabError.InvalidMessage, "fp32 length " + length);
                 }
+                _arrayKind = ArrayKind.Fp32;
                 _state = State.FixlenVal;
                 break;
             case FixlenType.Fp64:
@@ -849,11 +876,14 @@ public sealed class IStream
                 {
                     throw new SofabException(SofabError.InvalidMessage, "fp64 length " + length);
                 }
+                _arrayKind = ArrayKind.Fp64;
                 _state = State.FixlenVal;
                 break;
             case FixlenType.String:
             case FixlenType.Blob:
-                // String/blob are not valid as fixlen-array elements.
+                // String/blob are not valid as fixlen-array elements. §4.8 allows
+                // only fixed-width subtypes here, so this is a FORMAT violation
+                // judged before the hook fires -- never a §7.3 skip.
                 if (_inArray)
                 {
                     throw new SofabException(SofabError.InvalidMessage, "dynamic fixlen array element");
@@ -877,6 +907,16 @@ public sealed class IStream
                 break;
             default:
                 throw new SofabException(SofabError.InvalidMessage, "fixlen type");
+        }
+
+        // The fixlen_word of a fixlen array has now been consumed and validated,
+        // so the element subtype is known: announce the array (§4.8 step 5). This
+        // is the one and only ArrayBegin for this field -- the machine never
+        // re-enters FixlenLen for the array's later elements.
+        if (_arrayFixlen)
+        {
+            _arrayFixlen = false;
+            visitor.ArrayBegin(_id, _arrayKind, _arrayCount);
         }
 
         // An empty fixlen array (§4.8) carries its fixlen_word but no payload: the
@@ -945,9 +985,11 @@ public sealed class IStream
     }
 
     /// <summary>
-    /// Accumulate an array's element-count varint. Once complete it validates the
-    /// count, announces the array via <see cref="IVisitor.ArrayBegin"/>, and
-    /// transitions to the per-element state for the array's <see cref="ArrayKind"/>.
+    /// Accumulate an array's element-count varint. Once complete it enforces the
+    /// format ceiling and transitions to the per-element state. An integer array
+    /// is announced via <see cref="IVisitor.ArrayBegin"/> here; a fixlen array is
+    /// announced later, from <see cref="StepFixlenLen"/>, once its
+    /// <c>fixlen_word</c> has named the element subtype (§4.8).
     /// </summary>
     /// <param name="b">the next input byte</param>
     /// <param name="visitor">sink for decoded fields</param>
@@ -963,21 +1005,31 @@ public sealed class IStream
             throw new SofabException(SofabError.InvalidMessage, "array count");
         }
         int c = (int)count;
+        _arrayCount = c;
+
+        // A fixlen array (§4.8) always carries its fixlen_word next -- even when
+        // empty -- and only that word says fp32 or fp64. So do NOT announce the
+        // array here: read the word first (FixlenLen), which fires ArrayBegin
+        // once the subtype is known and legal. This is what lets a receiver
+        // decide the field is not its array's value (MESSAGE_SPEC §7.3) before
+        // applying any schema bound, and what makes a message truncated between
+        // the two words INCOMPLETE rather than judged on the count alone.
+        if (_arrayFixlen)
+        {
+            _arrayRemaining = c;
+            _inArray = true;
+            _state = State.FixlenLen;
+            return;
+        }
+
+        // An integer array's kind is fixed by its wire type, so its hook fires
+        // right here, immediately after the count word.
         visitor.ArrayBegin(_id, _arrayKind, c);
 
-        // A zero-count array has no elements. An empty integer array (§4.7) ends
-        // right here. An empty fixlen array (§4.8) still carries its fixlen_word,
-        // so enter FixlenLen (with _arrayRemaining == 0) to read and validate it
-        // before finishing; any other zero-count array returns straight to idle.
+        // A zero-count integer array is just [ header ][ count=0 ] (§4.7): no
+        // elements follow, so return straight to idle.
         if (c == 0)
         {
-            if (_arrayKind == ArrayKind.Fixlen)
-            {
-                _arrayRemaining = 0;
-                _inArray = true;
-                _state = State.FixlenLen;
-                return;
-            }
             _inArray = false;
             _state = State.Idle;
             return;
@@ -985,19 +1037,6 @@ public sealed class IStream
 
         _arrayRemaining = c;
         _inArray = true;
-
-        switch (_arrayKind)
-        {
-            case ArrayKind.Unsigned:
-                _state = State.VarintUnsigned;
-                break;
-            case ArrayKind.Signed:
-                _state = State.VarintSigned;
-                break;
-            case ArrayKind.Fixlen:
-            default:
-                _state = State.FixlenLen;
-                break;
-        }
+        _state = _arrayKind == ArrayKind.Signed ? State.VarintSigned : State.VarintUnsigned;
     }
 }

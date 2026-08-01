@@ -270,7 +270,9 @@ public class TestVectorsConformanceTests
         int count = vals.GetArrayLength();
         bool signed = et[0] == 'i';
         bool fp = et[0] == 'f';
-        ArrayKind kind = fp ? ArrayKind.Fixlen : (signed ? ArrayKind.Signed : ArrayKind.Unsigned);
+        ArrayKind kind = fp
+            ? (et == "fp32" ? ArrayKind.Fp32 : ArrayKind.Fp64)
+            : (signed ? ArrayKind.Signed : ArrayKind.Unsigned);
         t.Add($"arr:{id}:{kind}:{count}");
         foreach (JsonElement x in vals.EnumerateArray())
         {

@@ -95,8 +95,32 @@ public interface IVisitor
     /// Start of an array field. The <c>count</c> elements follow through the
     /// scalar / float callbacks with the same <c>id</c>.
     /// </summary>
+    /// <remarks>
+    /// Called exactly once per array field, never per element, and always before
+    /// the first element. <em>When</em> it is called depends on the wire type:
+    /// <list type="bullet">
+    /// <item><description>
+    /// An integer array (<c>ARRAY_UNSIGNED</c> / <c>ARRAY_SIGNED</c>) is announced
+    /// immediately after its element-count varint — the wire type already fixes
+    /// the element kind.
+    /// </description></item>
+    /// <item><description>
+    /// A fixlen array (<c>ARRAY_FIXLEN</c>) is announced only after its
+    /// <c>fixlen_word</c> has been read and validated, so <paramref name="kind"/>
+    /// is the true element subtype, <see cref="ArrayKind.Fp32"/> or
+    /// <see cref="ArrayKind.Fp64"/>. CORELIB_PLAN §4.8 fixes this order: a
+    /// receiver must be able to decide the field is not its array's value
+    /// (MESSAGE_SPEC §7.3, a wrong subtype ⇒ skip) <em>before</em> it applies any
+    /// schema bound to <paramref name="count"/>. A zero-count fixlen array still
+    /// carries its word, and is still announced exactly once.
+    /// </description></item>
+    /// </list>
+    /// The format ceiling on <paramref name="count"/> is enforced on the count
+    /// varint, ahead of this call, so an absurd count is rejected without any
+    /// allocation whatever the subtype turns out to be.
+    /// </remarks>
     /// <param name="id">field id</param>
-    /// <param name="kind">element category</param>
+    /// <param name="kind">element category; for a fixlen array, its element subtype</param>
     /// <param name="count">number of elements</param>
     void ArrayBegin(int id, ArrayKind kind, int count)
     {

@@ -88,7 +88,7 @@ public class IStreamTests
             0x00, 0x08, 0x40, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xEF, 0xFF, 0xFF,
             0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xEF, 0x7F));
         Assert.Equal(
-            new[] { "arr:0:FIXLEN:5", F64(1.0), F64(2.0), F64(3.0), F64(-double.MaxValue), F64(double.MaxValue) },
+            new[] { "arr:0:FP64:5", F64(1.0), F64(2.0), F64(3.0), F64(-double.MaxValue), F64(double.MaxValue) },
             ev);
     }
 
@@ -132,14 +132,17 @@ public class IStreamTests
         // Unsigned (0x03), signed (0x04) and fixlen (0x05) arrays, id 0, count 0.
         // A zero-count integer array is just [ header ][ count=0 ] (§4.7); a
         // zero-count fixlen array still carries its fixlen_word (§4.8, here 0x20
-        // for fp32). Each yields a single ArrayBegin, no elements.
+        // for fp32, 0x41 for fp64). Each yields a single ArrayBegin, no elements
+        // -- and the empty fixlen array still names its element subtype.
         Assert.Equal(new[] { "arr:0:UNSIGNED:0" }, Decode(Bytes(0x03, 0x00)));
         Assert.Equal(new[] { "arr:0:SIGNED:0" }, Decode(Bytes(0x04, 0x00)));
-        Assert.Equal(new[] { "arr:0:FIXLEN:0" }, Decode(Bytes(0x05, 0x00, 0x20)));
+        Assert.Equal(new[] { "arr:0:FP32:0" }, Decode(Bytes(0x05, 0x00, 0x20)));
+        Assert.Equal(new[] { "arr:0:FP64:0" }, Decode(Bytes(0x05, 0x00, 0x41)));
 
         // Byte-at-a-time must agree (exercises StepArrayCount's zero-count path
         // and StepFixlenLen consuming the fixlen_word of an empty array).
-        Assert.Equal(new[] { "arr:0:FIXLEN:0" }, DecodeByteByByte(Bytes(0x05, 0x00, 0x20)));
+        Assert.Equal(new[] { "arr:0:FP32:0" }, DecodeByteByByte(Bytes(0x05, 0x00, 0x20)));
+        Assert.Equal(new[] { "arr:0:FP64:0" }, DecodeByteByByte(Bytes(0x05, 0x00, 0x41)));
     }
 
     [Fact]
