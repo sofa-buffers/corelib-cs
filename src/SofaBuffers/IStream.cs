@@ -6,7 +6,9 @@
 
 using System;
 using System.Buffers.Binary;
+using System.Numerics;
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 
 using static sofab.WireFormat;
 
@@ -39,6 +41,13 @@ namespace sofab;
 /// payloads are delivered in chunks (so they may exceed RAM); array elements are
 /// announced with <see cref="IVisitor.ArrayBegin"/> and then delivered through
 /// the scalar / float callbacks.
+/// </para>
+/// <para>
+/// <b>Hot-path convention.</b> <see cref="Feed(byte[], int, int, IVisitor)"/>
+/// validates its slice once and the decode paths then read it without a per-byte
+/// bounds check; the single-byte varint case is written out at each call site
+/// rather than shared behind a helper, for the reason given on
+/// <c>ReadVarintMulti</c>, which decodes longer varints eight bytes at a time.
 /// </para>
 /// <para>
 /// This class is not thread-safe; decode one message from one thread. Reuse an
@@ -94,8 +103,32 @@ public sealed class IStream
     private FixlenType _fixlenType = FixlenType.Fp32;
     private int _fixlenTotal;
     private int _fixlenRemaining;
-    private readonly byte[] _acc = new byte[8];
+
+    /// <summary>
+    /// Little-endian accumulator for the raw bytes of an <c>fp32</c>/<c>fp64</c>
+    /// value split across a <c>Feed</c> boundary — the widest such value is 8
+    /// bytes, so a single register holds it. Kept as a scalar rather than a
+    /// <c>byte[8]</c> so that constructing a decoder allocates nothing beyond the
+    /// decoder object itself.
+    /// </summary>
+    private ulong _accBits;
     private int _accLen;
+
+    /// <summary>
+    /// Handed to <see cref="IVisitor.String"/> / <see cref="IVisitor.Blob"/> for a
+    /// zero-length payload, where the visitor is given a length of 0 and must not
+    /// read anything.
+    /// </summary>
+    private static readonly byte[] EmptyPayload = Array.Empty<byte>();
+
+    /// <summary>Longest possible varint encoding (10 bytes for a 64-bit value).</summary>
+    private const int MaxVarintBytes = 10;
+
+    /// <summary>The continuation flag of each of eight packed varint bytes.</summary>
+    private const ulong ContinuationBits = 0x8080_8080_8080_8080UL;
+
+    /// <summary>The 7-bit payload of each of eight packed varint bytes.</summary>
+    private const ulong PayloadBits = 0x7F7F_7F7F_7F7F_7F7FUL;
 
     // sequence nesting depth (for balanced start/end validation)
     private ulong _depth;
@@ -147,8 +180,24 @@ public sealed class IStream
     /// <exception cref="SofabException">
     /// with <see cref="SofabError.InvalidMessage"/> on malformed input
     /// </exception>
+    /// <exception cref="ArgumentNullException"><paramref name="data"/> is <c>null</c></exception>
+    /// <exception cref="ArgumentOutOfRangeException">
+    /// <c>[off, off + len)</c> is not a range of <paramref name="data"/>
+    /// </exception>
     public DecodeStatus Feed(byte[] data, int off, int len, IVisitor visitor)
     {
+        // Validate the slice once, here, rather than paying an array bounds check
+        // on every byte of the hot decode loops: everything below reads strictly
+        // inside [off, off+len), which this establishes is inside `data`.
+        if (data == null)
+        {
+            throw new ArgumentNullException(nameof(data));
+        }
+        if ((uint)off > (uint)data.Length || (uint)len > (uint)(data.Length - off))
+        {
+            throw new ArgumentOutOfRangeException(nameof(len), "slice out of range");
+        }
+
         int i = off;
         int endExclusive = off + len;
         while (i < endExclusive)
@@ -258,10 +307,26 @@ public sealed class IStream
     /// </returns>
     private int FastField(byte[] data, int start, int end, IVisitor visitor)
     {
-        int n = ReadVarint(data, start, end, out ulong header);
-        if (n == 0)
+        // The single-byte varint case is expanded at each hot site rather than
+        // shared behind a helper: measured under Callgrind the JIT declines to
+        // inline a helper that itself contains a call, so every varint read went
+        // through a real call. See ReadVarintMulti's remarks.
+        ref byte origin = ref MemoryMarshal.GetArrayDataReference(data);
+        ulong header;
+        int n;
+        if (end - start >= MaxVarintBytes)
         {
-            return 0;
+            ref byte h0 = ref Unsafe.Add(ref origin, (nint)(uint)start);
+            header = h0;
+            n = header < 0x80 ? 1 : ReadVarintMulti(ref h0, header, out header);
+        }
+        else
+        {
+            n = ReadVarintChecked(data, start, end, out header);
+            if (n == 0)
+            {
+                return 0;
+            }
         }
         int p = start + n;
 
@@ -277,20 +342,42 @@ public sealed class IStream
         {
             case T_VARINT_UNSIGNED:
             {
-                int m = ReadVarint(data, p, end, out ulong value);
-                if (m == 0)
+                ulong value;
+                int m;
+                if (end - p >= MaxVarintBytes)
                 {
-                    return 0;
+                    ref byte v0 = ref Unsafe.Add(ref origin, (nint)(uint)p);
+                    value = v0;
+                    m = value < 0x80 ? 1 : ReadVarintMulti(ref v0, value, out value);
+                }
+                else
+                {
+                    m = ReadVarintChecked(data, p, end, out value);
+                    if (m == 0)
+                    {
+                        return 0;
+                    }
                 }
                 visitor.Unsigned(id, value);
                 return p + m - start;
             }
             case T_VARINT_SIGNED:
             {
-                int m = ReadVarint(data, p, end, out ulong value);
-                if (m == 0)
+                ulong value;
+                int m;
+                if (end - p >= MaxVarintBytes)
                 {
-                    return 0;
+                    ref byte v0 = ref Unsafe.Add(ref origin, (nint)(uint)p);
+                    value = v0;
+                    m = value < 0x80 ? 1 : ReadVarintMulti(ref v0, value, out value);
+                }
+                else
+                {
+                    m = ReadVarintChecked(data, p, end, out value);
+                    if (m == 0)
+                    {
+                        return 0;
+                    }
                 }
                 visitor.Signed(id, ZigzagDecode(value));
                 return p + m - start;
@@ -327,14 +414,32 @@ public sealed class IStream
     /// <summary>Fast-path decode of a single fixlen field (fp32/fp64/string/blob).</summary>
     private int FastFixlen(byte[] data, int start, int p, int end, int id, IVisitor visitor)
     {
-        int n = ReadVarint(data, p, end, out ulong lenHeader);
-        if (n == 0)
+        ulong lenHeader;
+        int n;
+        if (end - p >= MaxVarintBytes)
         {
-            return 0;
+            ref byte w0 = ref Unsafe.Add(ref MemoryMarshal.GetArrayDataReference(data), (nint)(uint)p);
+            lenHeader = w0;
+            n = lenHeader < 0x80 ? 1 : ReadVarintMulti(ref w0, lenHeader, out lenHeader);
+        }
+        else
+        {
+            n = ReadVarintChecked(data, p, end, out lenHeader);
+            if (n == 0)
+            {
+                return 0;
+            }
         }
         p += n;
 
-        FixlenType subtype = FixlenTypeExtensions.FromRaw((int)(lenHeader & 0x07));
+        // Decoded inline rather than through a helper: the tag is three bits and
+        // only 0..3 are assigned, so the reserved subtypes 4..7 (§4.6) are one
+        // unsigned comparison away.
+        var subtype = (FixlenType)(lenHeader & 0x07);
+        if ((uint)subtype > (uint)FixlenType.Blob)
+        {
+            ThrowFixlenType((int)(lenHeader & 0x07));
+        }
         ulong lengthValue = lenHeader >> 3;
         if (lengthValue > ARRAY_MAX)
         {
@@ -372,11 +477,11 @@ public sealed class IStream
                 {
                     if (subtype == FixlenType.String)
                     {
-                        visitor.String(id, 0, 0, _acc, 0, 0);
+                        visitor.String(id, 0, 0, EmptyPayload, 0, 0);
                     }
                     else
                     {
-                        visitor.Blob(id, 0, 0, _acc, 0, 0);
+                        visitor.Blob(id, 0, 0, EmptyPayload, 0, 0);
                     }
                     return p - start;
                 }
@@ -404,8 +509,15 @@ public sealed class IStream
     /// <summary>Fast-path decode of a whole varint array (unsigned or signed).</summary>
     private int FastVarintArray(byte[] data, int start, int p, int end, int id, ArrayKind kind, bool signed, IVisitor visitor)
     {
-        int n = ReadVarint(data, p, end, out ulong count);
-        if (n == 0)
+        ulong count;
+        int n;
+        if (end - p >= MaxVarintBytes)
+        {
+            ref byte c0 = ref Unsafe.Add(ref MemoryMarshal.GetArrayDataReference(data), (nint)(uint)p);
+            count = c0;
+            n = count < 0x80 ? 1 : ReadVarintMulti(ref c0, count, out count);
+        }
+        else if ((n = ReadVarintChecked(data, p, end, out count)) == 0)
         {
             return 0; // count varint not complete; re-parse from header later
         }
@@ -419,9 +531,76 @@ public sealed class IStream
         // resume at the next field without reading any elements.
         visitor.ArrayBegin(id, kind, remaining);
 
+        // The element loop is the decoder's densest path — one varint per element
+        // and no headers — so the whole SWAR read is expanded into it rather than
+        // called (a call costs more than the decode it wraps at this size) and the
+        // buffer's data reference is hoisted out. The tail, where fewer than
+        // MaxVarintBytes bytes remain, drops back to the shared checked path
+        // below, which is also where a Feed boundary inside an element lands.
+        ref byte origin = ref MemoryMarshal.GetArrayDataReference(data);
+        int bulkEnd = end - MaxVarintBytes;
+        while (remaining > 0 && p <= bulkEnd)
+        {
+            ref byte e0 = ref Unsafe.Add(ref origin, (nint)(uint)p);
+            ulong value = e0;
+            if (value < 0x80)
+            {
+                p++;
+            }
+            else
+            {
+                ulong word = Unsafe.ReadUnaligned<ulong>(ref e0);
+                if (!BitConverter.IsLittleEndian)
+                {
+                    word = BinaryPrimitives.ReverseEndianness(word);
+                }
+                ulong ends = ~word & ContinuationBits;
+                if (ends != 0)
+                {
+                    int tz = BitOperations.TrailingZeroCount(ends);
+                    word &= ends ^ (ends - 1);
+                    p += (tz >> 3) + 1;
+                }
+                else
+                {
+                    p += MaxVarintBytes - 2;
+                }
+                ulong g = word & PayloadBits;
+                g = ((g & 0x7F007F007F007F00UL) >> 1) | (g & 0x007F007F007F007FUL);
+                g = ((g & 0x3FFF00003FFF0000UL) >> 2) | (g & 0x00003FFF00003FFFUL);
+                value = ((g & 0x0FFFFFFF00000000UL) >> 4) | (g & 0x000000000FFFFFFFUL);
+                if (ends == 0)
+                {
+                    // Eight continuation bytes: 56 payload bits so far, at most
+                    // two to go, and only the tenth can break the 64-bit bound.
+                    ulong x = Unsafe.Add(ref e0, 8);
+                    value |= (x & 0x7F) << 56;
+                    p++;
+                    if (x >= 0x80)
+                    {
+                        x = Unsafe.Add(ref e0, 9);
+                        if (x > 1)
+                        {
+                            ThrowVarintOverflow();
+                        }
+                        value |= x << 63;
+                        p++;
+                    }
+                }
+            }
+            if (signed)
+            {
+                visitor.Signed(id, ZigzagDecode(value));
+            }
+            else
+            {
+                visitor.Unsigned(id, value);
+            }
+            remaining--;
+        }
         while (remaining > 0)
         {
-            int m = ReadVarint(data, p, end, out ulong value);
+            int m = ReadVarintChecked(data, p, end, out ulong tail);
             if (m == 0)
             {
                 // This element is split across the Feed boundary. Commit the
@@ -433,15 +612,15 @@ public sealed class IStream
                 _state = signed ? State.VarintSigned : State.VarintUnsigned;
                 return p - start;
             }
+            p += m;
             if (signed)
             {
-                visitor.Signed(id, ZigzagDecode(value));
+                visitor.Signed(id, ZigzagDecode(tail));
             }
             else
             {
-                visitor.Unsigned(id, value);
+                visitor.Unsigned(id, tail);
             }
-            p += m;
             remaining--;
         }
         return p - start;
@@ -455,8 +634,15 @@ public sealed class IStream
     /// </remarks>
     private int FastFixlenArray(byte[] data, int start, int p, int end, int id, IVisitor visitor)
     {
-        int n = ReadVarint(data, p, end, out ulong count);
-        if (n == 0)
+        ulong count;
+        int n;
+        if (end - p >= MaxVarintBytes)
+        {
+            ref byte c0 = ref Unsafe.Add(ref MemoryMarshal.GetArrayDataReference(data), (nint)(uint)p);
+            count = c0;
+            n = count < 0x80 ? 1 : ReadVarintMulti(ref c0, count, out count);
+        }
+        else if ((n = ReadVarintChecked(data, p, end, out count)) == 0)
         {
             return 0;
         }
@@ -485,11 +671,19 @@ public sealed class IStream
             _arrayRemaining = remaining;
             _arrayCount = remaining;
             _accLen = 0;
+            _accBits = 0;
             _state = State.FixlenLen;
             return p - start;
         }
 
-        FixlenType subtype = FixlenTypeExtensions.FromRaw((int)(lenHeader & 0x07));
+        // Decoded inline rather than through a helper: the tag is three bits and
+        // only 0..3 are assigned, so the reserved subtypes 4..7 (§4.6) are one
+        // unsigned comparison away.
+        var subtype = (FixlenType)(lenHeader & 0x07);
+        if ((uint)subtype > (uint)FixlenType.Blob)
+        {
+            ThrowFixlenType((int)(lenHeader & 0x07));
+        }
         ulong lengthValue = lenHeader >> 3;
         if (lengthValue > ARRAY_MAX)
         {
@@ -545,6 +739,7 @@ public sealed class IStream
                 _fixlenTotal = need;
                 _fixlenRemaining = need;
                 _accLen = 0;
+                _accBits = 0;
                 _state = State.FixlenVal;
                 return p - start;
             }
@@ -573,69 +768,162 @@ public sealed class IStream
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static int ReadVarint(byte[] data, int pos, int end, out ulong value)
     {
-        int p = pos;
-        if (end - p >= 10)
+        if (end - pos >= MaxVarintBytes)
         {
-            // Room for a max-length (10-byte) varint: decode with no per-byte
-            // end check, continuation flagged by the sign bit of the raw byte.
-            int b = (sbyte)data[p++];
-            ulong v = (ulong)(b & 0x7F);
-            if (b < 0)
-            {
-                int shift = 7;
-                do
-                {
-                    b = (sbyte)data[p++];
-                    int chunk = b & 0x7F;
-                    // Reject an overlong (>64-bit) varint: any payload bit that
-                    // would spill past bit 63 makes the input malformed (§4.1/§6.3).
-                    int room = VALUE_BITS - shift;
-                    if (room < 7 && (uint)chunk >> room != 0)
-                    {
-                        throw new SofabException(SofabError.InvalidMessage, "varint overflow");
-                    }
-                    v |= ((ulong)chunk) << shift;
-                    shift += 7;
-                }
-                while (b < 0 && shift < VALUE_BITS);
-                if (b < 0)
-                {
-                    throw new SofabException(SofabError.InvalidMessage, "varint overflow");
-                }
-            }
-            value = v;
-            return p - pos;
+            return ReadVarintUnchecked(ref MemoryMarshal.GetArrayDataReference(data), pos, out value);
         }
         return ReadVarintChecked(data, pos, end, out value);
     }
 
-    /// <summary>Per-byte checked decode for the buffer tail; 0 when incomplete.</summary>
+    /// <summary>
+    /// Decode a varint at <paramref name="pos"/> knowing the buffer holds at least
+    /// <see cref="MaxVarintBytes"/> bytes there, so neither an end check nor an
+    /// array bounds check is needed per byte.
+    /// </summary>
+    /// <remarks>
+    /// Fully unrolled rather than looped: the shift is then an immediate and there
+    /// is no shift counter to maintain or test, which is what makes the
+    /// single-byte case (every small field header and small scalar — the common
+    /// case by design, CORELIB_PLAN §1) two instructions and each further byte
+    /// about four.
+    /// <para>
+    /// The 64-bit bound (§4.1) is enforced where it can actually be violated — the
+    /// tenth byte — instead of on every byte: bytes 1..9 carry 63 payload bits and
+    /// can never overflow, and on the tenth only bit 0 fits, so any value above
+    /// <c>1</c> either spills past bit 63 or continues into an 11th byte. Both are
+    /// the <c>INVALID</c> outcome, and one comparison rejects both.
+    /// </para>
+    /// </remarks>
+    /// <returns>the number of bytes consumed (1..<see cref="MaxVarintBytes"/>)</returns>
+    /// <exception cref="SofabException">on varint overflow (&gt; <see cref="VALUE_BITS"/> bits).</exception>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static int ReadVarintUnchecked(ref byte data, int pos, out ulong value)
+    {
+        ref byte b = ref Unsafe.Add(ref data, (nint)(uint)pos);
+        ulong v = b;
+        if (v < 0x80)
+        {
+            value = v;
+            return 1;
+        }
+        return ReadVarintMulti(ref b, v, out value);
+    }
+
+    /// <summary>
+    /// Decode a varint of two or more bytes whose first byte is
+    /// <paramref name="first"/>, knowing at least <see cref="MaxVarintBytes"/>
+    /// bytes are readable from <paramref name="b"/>.
+    /// </summary>
+    /// <remarks>
+    /// Decodes eight bytes at a time with word arithmetic (SWAR) instead of
+    /// walking the encoding byte by byte. One unaligned 64-bit load covers the
+    /// whole common case; the terminating byte is the lowest byte whose
+    /// continuation bit is clear, which <c>~word &amp; 0x80..80</c> isolates and a
+    /// trailing-zero count locates, and the bytes past it are masked away. The
+    /// three shift-and-merge steps then close the one-bit gap each byte leaves,
+    /// pairing 7-bit groups into 14-, then 28-, then 56-bit halves — so the
+    /// payload is gathered in a fixed dozen instructions regardless of length,
+    /// where a per-byte loop costs a load, mask, shift, merge and test each time.
+    /// <para>
+    /// Only a varint spilling past eight bytes (a value ≥ 2^56) needs the tail
+    /// below, and only its tenth byte can break the 64-bit bound (§4.1): bit 63
+    /// is the sole payload bit left there, so anything above <c>1</c> either
+    /// overflows or continues into an eleventh byte, and one comparison rejects
+    /// both. This is deliberately portable word arithmetic — no BMI2
+    /// <c>PEXT</c> — because that instruction is microcoded and an order of
+    /// magnitude slower on some x86-64 parts, which would trade real throughput
+    /// on those hosts for a lower instruction count.
+    /// </para>
+    /// </remarks>
+    /// <param name="b">reference to the varint's first byte</param>
+    /// <param name="first">that first byte, continuation flag still set</param>
+    /// <param name="value">the decoded value</param>
+    /// <returns>the number of bytes consumed (2..<see cref="MaxVarintBytes"/>)</returns>
+    /// <exception cref="SofabException">on varint overflow (&gt; <see cref="VALUE_BITS"/> bits).</exception>
+    private static int ReadVarintMulti(ref byte b, ulong first, out ulong value)
+    {
+        ulong word = Unsafe.ReadUnaligned<ulong>(ref b);
+        if (!BitConverter.IsLittleEndian)
+        {
+            word = BinaryPrimitives.ReverseEndianness(word);
+        }
+
+        // A clear continuation bit marks the last byte of the encoding.
+        ulong ends = ~word & ContinuationBits;
+        if (ends != 0)
+        {
+            int tz = BitOperations.TrailingZeroCount(ends);
+            // Keep bits 0..tz — every byte up to and including the terminator —
+            // and drop whatever followed the varint in the buffer.
+            word &= ends ^ (ends - 1);
+            ulong g = word & PayloadBits;
+            g = ((g & 0x7F007F007F007F00UL) >> 1) | (g & 0x007F007F007F007FUL);
+            g = ((g & 0x3FFF00003FFF0000UL) >> 2) | (g & 0x00003FFF00003FFFUL);
+            value = ((g & 0x0FFFFFFF00000000UL) >> 4) | (g & 0x000000000FFFFFFFUL);
+            return (tz >> 3) + 1;
+        }
+
+        // Eight continuation bytes: 56 payload bits so far, at most two to go.
+        ulong low = word & PayloadBits;
+        low = ((low & 0x7F007F007F007F00UL) >> 1) | (low & 0x007F007F007F007FUL);
+        low = ((low & 0x3FFF00003FFF0000UL) >> 2) | (low & 0x00003FFF00003FFFUL);
+        low = ((low & 0x0FFFFFFF00000000UL) >> 4) | (low & 0x000000000FFFFFFFUL);
+        ulong x = Unsafe.Add(ref b, 8);
+        low |= (x & 0x7F) << 56;
+        if (x < 0x80)
+        {
+            value = low;
+            return 9;
+        }
+        x = Unsafe.Add(ref b, 9);
+        if (x > 1)
+        {
+            ThrowVarintOverflow();
+        }
+        value = low | (x << 63);
+        return MaxVarintBytes;
+    }
+
+
+    /// <summary>Raise the <c>INVALID</c> outcome for a reserved fixlen subtype (§4.6).</summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static void ThrowFixlenType(int raw) =>
+        throw new SofabException(SofabError.InvalidMessage, "fixlen type " + raw);
+
+    /// <summary>Raise the <c>INVALID</c> outcome for a varint past the 64-bit bound (§4.1).</summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static void ThrowVarintOverflow() =>
+        throw new SofabException(SofabError.InvalidMessage, "varint overflow");
+
+    /// <summary>
+    /// Per-byte decode for the buffer tail, where fewer than
+    /// <see cref="MaxVarintBytes"/> bytes remain; <c>0</c> when the varint is not
+    /// complete in them.
+    /// </summary>
+    /// <remarks>
+    /// Both callers reach this only with fewer than <see cref="MaxVarintBytes"/>
+    /// bytes left, so at most nine can be consumed — and nine bytes carry 63
+    /// payload bits, one short of the 64-bit bound (§4.1). Only a tenth byte can
+    /// break that bound and by construction it is not in this buffer: such a
+    /// varint is <c>INCOMPLETE</c> here and is decoded, and bounds-checked, by the
+    /// fast path once the next chunk arrives. So no per-byte overflow test is
+    /// needed, which matters because a short message ends in this path — every
+    /// field within <see cref="MaxVarintBytes"/> bytes of the end comes through here.
+    /// </remarks>
     private static int ReadVarintChecked(byte[] data, int pos, int end, out ulong value)
     {
+        ref byte origin = ref MemoryMarshal.GetArrayDataReference(data);
         ulong v = 0;
         int shift = 0;
-        int p = pos;
-        while (p < end)
+        for (int p = pos; p < end; shift += 7)
         {
-            int b = data[p++] & 0xFF;
-            int chunk = b & 0x7F;
-            // Reject an overlong (>64-bit) varint: any payload bit that would
-            // spill past bit 63 makes the input malformed (§4.1/§6.3).
-            int room = VALUE_BITS - shift;
-            if (room < 7 && (uint)chunk >> room != 0)
-            {
-                throw new SofabException(SofabError.InvalidMessage, "varint overflow");
-            }
-            v |= ((ulong)chunk) << shift;
-            shift += 7;
-            if ((b & 0x80) == 0)
+            ulong b = Unsafe.Add(ref origin, (nint)(uint)p);
+            p++;
+            v |= (b & 0x7F) << shift;
+            if (b < 0x80)
             {
                 value = v;
                 return p - pos;
-            }
-            if (shift >= VALUE_BITS)
-            {
-                throw new SofabException(SofabError.InvalidMessage, "varint overflow");
             }
         }
         value = 0;
@@ -848,7 +1136,11 @@ public sealed class IStream
             return;
         }
         ulong header = _varintOut;
-        FixlenType subtype = FixlenTypeExtensions.FromRaw((int)(header & 0x07));
+        var subtype = (FixlenType)(header & 0x07);
+        if ((uint)subtype > (uint)FixlenType.Blob)
+        {
+            ThrowFixlenType((int)(header & 0x07));
+        }
         ulong lengthValue = header >> 3;
         if (lengthValue > ARRAY_MAX)
         {
@@ -860,6 +1152,7 @@ public sealed class IStream
         _fixlenTotal = length;
         _fixlenRemaining = length;
         _accLen = 0;
+        _accBits = 0;
 
         switch (subtype)
         {
@@ -892,11 +1185,11 @@ public sealed class IStream
                 {
                     if (subtype == FixlenType.String)
                     {
-                        visitor.String(_id, 0, 0, _acc, 0, 0);
+                        visitor.String(_id, 0, 0, EmptyPayload, 0, 0);
                     }
                     else
                     {
-                        visitor.Blob(_id, 0, 0, _acc, 0, 0);
+                        visitor.Blob(_id, 0, 0, EmptyPayload, 0, 0);
                     }
                     _state = State.Idle;
                 }
@@ -931,7 +1224,7 @@ public sealed class IStream
 
     /// <summary>
     /// Accumulate the raw little-endian bytes of a fixed-size float value
-    /// (<c>fp32</c> / <c>fp64</c>) into <see cref="_acc"/>. Once the value is
+    /// (<c>fp32</c> / <c>fp64</c>) into <see cref="_accBits"/>. Once the value is
     /// complete it is decoded and pushed to the visitor; within an array the
     /// element size is reused for the next element, otherwise the machine returns
     /// to idle.
@@ -940,7 +1233,9 @@ public sealed class IStream
     /// <param name="visitor">sink for decoded fields</param>
     private void StepFixlenVal(int b, IVisitor visitor)
     {
-        _acc[_accLen++] = (byte)b;
+        // Little-endian: byte k of the payload contributes bits [8k, 8k+8).
+        _accBits |= (ulong)(byte)b << (_accLen * 8);
+        _accLen++;
         _fixlenRemaining--;
         if (_fixlenRemaining != 0)
         {
@@ -949,20 +1244,11 @@ public sealed class IStream
 
         if (_fixlenType == FixlenType.Fp32)
         {
-            int bits = (_acc[0] & 0xFF)
-                    | ((_acc[1] & 0xFF) << 8)
-                    | ((_acc[2] & 0xFF) << 16)
-                    | ((_acc[3] & 0xFF) << 24);
-            visitor.Fp32(_id, BitConverter.Int32BitsToSingle(bits));
+            visitor.Fp32(_id, BitConverter.Int32BitsToSingle((int)(uint)_accBits));
         }
         else if (_fixlenType == FixlenType.Fp64)
         {
-            long bits = 0;
-            for (int i = 0; i < 8; i++)
-            {
-                bits |= ((long)(_acc[i] & 0xFF)) << (i * 8);
-            }
-            visitor.Fp64(_id, BitConverter.Int64BitsToDouble(bits));
+            visitor.Fp64(_id, BitConverter.Int64BitsToDouble((long)_accBits));
         }
         else
         {
@@ -977,6 +1263,7 @@ public sealed class IStream
             {
                 _fixlenRemaining = _fixlenTotal;
                 _accLen = 0;
+                _accBits = 0;
                 return;
             }
             _inArray = false;

@@ -31,24 +31,4 @@ internal static class FixlenTypeExtensions
 {
     /// <summary>The 3-bit wire tag (0..3) for this sub-type.</summary>
     public static int Raw(this FixlenType type) => (int)type;
-
-    /// <summary>
-    /// Decode a 3-bit fixlen tag from the wire.
-    /// </summary>
-    /// <param name="raw">the tag value (low 3 bits of the fixlen header)</param>
-    /// <returns>the matching <see cref="FixlenType"/></returns>
-    /// <exception cref="SofabException">
-    /// with <see cref="SofabError.InvalidMessage"/> for a reserved or unsupported tag
-    /// </exception>
-    public static FixlenType FromRaw(int raw)
-    {
-        switch (raw)
-        {
-            case 0x0: return FixlenType.Fp32;
-            case 0x1: return FixlenType.Fp64;
-            case 0x2: return FixlenType.String;
-            case 0x3: return FixlenType.Blob;
-            default: throw new SofabException(SofabError.InvalidMessage, "fixlen type " + raw);
-        }
-    }
 }
