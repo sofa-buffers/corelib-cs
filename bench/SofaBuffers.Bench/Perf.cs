@@ -34,6 +34,15 @@ internal static class Perf
 {
     private const double MinSeconds = 1.0;
 
+    // Batch size for the timed loops: enough iterations that one clock reading
+    // is a rounding error against them. CpuNow() reads /proc/self/stat, which
+    // costs on the order of tens of microseconds -- far more than one encode of
+    // the 170-byte message -- so reading it once per iteration, as these loops
+    // used to, measures mostly the clock (and, because the cycle counter
+    // brackets the whole loop, would pollute cycles/op too on ports that have
+    // one). Reading it once per batch puts it under ~0.01% of the result.
+    private const double BatchSeconds = 0.01;
+
     // Consumed after the loops so the JIT cannot elide the work.
     internal static long Blackhole;
 
@@ -47,8 +56,18 @@ internal static class Perf
 
     private static ulong Cycles() => 0;
 
+    // Cached: Process.GetCurrentProcess() allocates a fresh Process object, and
+    // doing that inside a measured loop adds GC pressure to a benchmark of an
+    // allocation-sensitive codec. TotalProcessorTime is cached on the object,
+    // so Refresh() first or it would never advance.
+    private static readonly Process Self = Process.GetCurrentProcess();
+
     /// <summary>Process CPU time in seconds (not wall-clock), mirroring C clock().</summary>
-    private static double CpuNow() => Process.GetCurrentProcess().TotalProcessorTime.TotalSeconds;
+    private static double CpuNow()
+    {
+        Self.Refresh();
+        return Self.TotalProcessorTime.TotalSeconds;
+    }
 
     // --- message under test (identical to perf.c / perf.rs) ----------------
     private const string PerfString = "perf-benchmark-message";
@@ -153,9 +172,25 @@ internal static class Perf
         long sink = 0;
         for (int i = 0; i < 200_000; i++)
         {
-            sink += PerfEncode(buf); // warmup
+            sink += PerfEncode(buf); // warmup / JIT (before calibration, so the batch is sized against compiled code)
         }
         int msg = PerfEncode(buf);
+
+        // Grow a batch until it spans BatchSeconds, so the clock read that ends
+        // it is a rounding error against the work it timed.
+        long batch = 1;
+        for (; ; batch *= 2)
+        {
+            double b0 = CpuNow();
+            for (long k = 0; k < batch; k++)
+            {
+                sink += PerfEncode(buf);
+            }
+            if (CpuNow() - b0 >= BatchSeconds)
+            {
+                break;
+            }
+        }
 
         long it = 0;
         ulong c0 = Cycles();
@@ -163,8 +198,11 @@ internal static class Perf
         double el;
         do
         {
-            sink += PerfEncode(buf);
-            it++;
+            for (long k = 0; k < batch; k++)
+            {
+                sink += PerfEncode(buf);
+            }
+            it += batch;
             el = CpuNow() - t0;
         }
         while (el < MinSeconds);
@@ -186,9 +224,29 @@ internal static class Perf
         long sink = 0;
         for (int i = 0; i < 200_000; i++)
         {
+            // warmup / JIT (before calibration, so the batch is sized against compiled code)
             var o = new PerfOut();
             PerfDecode(buf, len, o);
             sink += o.Acc;
+        }
+
+        // Grow a batch until it spans BatchSeconds, so the clock read that ends
+        // it is a rounding error against the work it timed. The per-op PerfOut
+        // construction stays inside the batch: it is part of the measured op.
+        long batch = 1;
+        for (; ; batch *= 2)
+        {
+            double b0 = CpuNow();
+            for (long k = 0; k < batch; k++)
+            {
+                var o = new PerfOut();
+                PerfDecode(buf, len, o);
+                sink += o.Acc;
+            }
+            if (CpuNow() - b0 >= BatchSeconds)
+            {
+                break;
+            }
         }
 
         long it = 0;
@@ -197,10 +255,13 @@ internal static class Perf
         double el;
         do
         {
-            var o = new PerfOut();
-            PerfDecode(buf, len, o);
-            sink += o.Acc;
-            it++;
+            for (long k = 0; k < batch; k++)
+            {
+                var o = new PerfOut();
+                PerfDecode(buf, len, o);
+                sink += o.Acc;
+            }
+            it += batch;
             el = CpuNow() - t0;
         }
         while (el < MinSeconds);

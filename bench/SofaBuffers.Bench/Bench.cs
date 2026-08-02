@@ -20,11 +20,33 @@ internal static class Bench
     private const int N = 1000;
     private const double MinSeconds = 1.0;
 
+    // Batch size for the timed loop: enough iterations that one clock reading is
+    // a rounding error against them. CpuNow() reads /proc/self/stat, which costs
+    // on the order of tens of microseconds -- far more than an entire `typical
+    // message` operation -- so reading it once per iteration, as this loop used
+    // to, measures mostly the clock. Worse, it is a fixed cost per operation
+    // rather than a scaling factor, so it distorts the workloads unevenly:
+    // barely visible on a 1000-element array, dominant on a 37-byte message.
+    // BENCH_SPEC asks for a ~1 s CPU-time loop, a warmup and a given MB/s
+    // formula; how often the clock is sampled inside that loop is ours to
+    // choose, and the printed output is unchanged.
+    private const double BatchSeconds = 0.01; // clock cost lands under ~0.01% of a batch
+
     // Consumed after the loops so the JIT cannot elide the work.
     internal static long Blackhole;
 
+    // Cached: Process.GetCurrentProcess() allocates a fresh Process object, and
+    // doing that inside a measured loop adds GC pressure to a benchmark of an
+    // allocation-sensitive codec. TotalProcessorTime is cached on the object,
+    // so Refresh() first or it would never advance.
+    private static readonly Process Self = Process.GetCurrentProcess();
+
     /// <summary>Process CPU time in seconds (not wall-clock), mirroring C clock().</summary>
-    private static double CpuNow() => Process.GetCurrentProcess().TotalProcessorTime.TotalSeconds;
+    private static double CpuNow()
+    {
+        Self.Refresh();
+        return Self.TotalProcessorTime.TotalSeconds;
+    }
 
     /// <summary>Decode sink that folds every value into a checksum (defeats elision).</summary>
     private sealed class Checksum : IVisitor
@@ -63,20 +85,43 @@ internal static class Bench
         os.WriteSequenceEnd();
     }
 
-    /// <summary>Run <paramref name="body"/> for ~1 s of CPU time (after warmup) -> MB/s.</summary>
+    /// <summary>Grow a batch until it spans <see cref="BatchSeconds"/>, so the
+    /// clock read that ends it is a rounding error against the work it timed.</summary>
+    private static long CalibrateBatch(Action body)
+    {
+        for (long batch = 1; ; batch *= 2)
+        {
+            double t0 = CpuNow();
+            for (long k = 0; k < batch; k++)
+            {
+                body();
+            }
+            if (CpuNow() - t0 >= BatchSeconds)
+            {
+                return batch;
+            }
+        }
+    }
+
+    /// <summary>Run <paramref name="body"/> for ~1 s of CPU time (after warmup) -> MB/s.
+    /// The clock is read once per batch, never per operation -- see <see cref="BatchSeconds"/>.</summary>
     private static double Measure(int bytes, Action body)
     {
         for (int i = 0; i < 200_000; i++)
         {
-            body(); // warmup / JIT
+            body(); // warmup / JIT (before calibration, so the batch is sized against compiled code)
         }
+        long batch = CalibrateBatch(body);
         long it = 0;
         double t0 = CpuNow();
         double el;
         do
         {
-            body();
-            it++;
+            for (long k = 0; k < batch; k++)
+            {
+                body();
+            }
+            it += batch;
             el = CpuNow() - t0;
         }
         while (el < MinSeconds);
