@@ -6,6 +6,9 @@
 
 using System;
 using System.Buffers.Binary;
+using System.Numerics;
+using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 using System.Text;
 
 using static sofab.WireFormat;
@@ -25,6 +28,17 @@ namespace sofab;
 /// <para>
 /// An initial <c>offset</c> reserves space at the front of the buffer for a
 /// lower-layer protocol header, avoiding a copy.
+/// </para>
+/// <para>
+/// <b>Hot-path convention.</b> The single-byte varint case — every small field
+/// header and small scalar, which the format is designed to make the common one
+/// (CORELIB_PLAN §1) — is written out at each call site rather than shared
+/// behind a helper, and each writer checks buffer capacity once for a whole
+/// field instead of once per byte. Measured under Callgrind
+/// (<c>bench/run_callgrind.sh</c>) the JIT does not inline a helper that itself
+/// contains a call, even when marked <c>AggressiveInlining</c>, which cost about
+/// twenty instructions per varint written; longer varints go to
+/// <c>WriteVarintAtMulti</c>, which assembles the whole encoding in a register.
 /// </para>
 /// <para>This class is not thread-safe; encode one message from one thread.</para>
 /// </remarks>
@@ -58,21 +72,57 @@ public sealed class OStream
     /// bound the run and frame eagerly past the bound; C# is not one, so there is
     /// no eager fallback and no depth constant to configure.
     /// <para>
-    /// Allocated lazily on the first held-back header and grown by doubling, so an
-    /// encoder that never opens a sequence — the common flat message — pays
-    /// nothing for it. <c>MAX_DEPTH</c> caps the growth at 255 entries.
+    /// Spill storage only: the first <see cref="InlinePendingCapacity"/> ids live
+    /// in <see cref="_inlinePending"/>, inside the encoder, so nesting that shallow
+    /// — and an encoder that never opens a sequence at all — allocates nothing.
+    /// This array appears only past that depth and grows by doubling;
+    /// <c>MAX_DEPTH</c> caps it at 255 entries in total.
     /// </para>
     /// </remarks>
     private int[]? _pending;
 
-    /// <summary>Number of valid entries in <see cref="_pending"/>.</summary>
+    /// <summary>
+    /// The first <see cref="InlinePendingCapacity"/> held-back ids, stored in the
+    /// encoder itself so that the common shallow nesting holds a sequence back
+    /// without allocating anything; <see cref="_pending"/> takes over beyond that.
+    /// </summary>
+    private PendingIds _inlinePending;
+
+    /// <summary>Number of valid held-back ids (inline entries first, then <see cref="_pending"/>).</summary>
     private int _nPending;
 
     /// <summary>
-    /// Entries the pending run allocates on its first held-back header. Deeper
-    /// nesting doubles it; real schemas rarely reach even this.
+    /// Held-back ids kept inline in the encoder. Nesting deeper than this spills
+    /// to <see cref="_pending"/>, which grows on demand; real schemas rarely reach
+    /// even this depth.
+    /// </summary>
+    private const int InlinePendingCapacity = 4;
+
+    /// <summary>
+    /// Entries the spill array allocates the first time nesting exceeds
+    /// <see cref="InlinePendingCapacity"/>. Deeper nesting doubles it.
     /// </summary>
     private const int InitialPendingCapacity = 8;
+
+    /// <summary>Inline storage for the first <see cref="InlinePendingCapacity"/> held-back ids.</summary>
+    [InlineArray(InlinePendingCapacity)]
+    private struct PendingIds
+    {
+        private int _first;
+    }
+
+    /// <summary>Longest possible varint encoding (10 bytes for a 64-bit value).</summary>
+    private const int MaxVarintBytes = 10;
+
+    /// <summary>The continuation flag of each of eight packed varint bytes.</summary>
+    private const ulong ContinuationBits = 0x8080_8080_8080_8080UL;
+
+    /// <summary>
+    /// Longest string <see cref="WriteString"/> transcodes with its own scalar
+    /// ASCII loop. Beyond this the runtime's vectorized UTF-8 encoder is faster
+    /// than a byte-at-a-time copy, so the general path takes over.
+    /// </summary>
+    private const int AsciiFastPathMaxChars = 96;
 
     private readonly FlushSink? _sink;
 
@@ -239,26 +289,114 @@ public sealed class OStream
     private void WriteVarint(ulong value)
     {
         int p = _offset;
-        if (_end - p >= 10)
+        if (_end - p >= MaxVarintBytes)
         {
-            byte[] b = _buffer;
+            ref byte b = ref MemoryMarshal.GetArrayDataReference(_buffer);
             if (value < 0x80)
             {
-                b[p] = (byte)value;
-                _offset = p + 1;
-                return;
+                Unsafe.Add(ref b, (nint)(uint)p) = (byte)value;
+                p++;
             }
-            do
+            else
             {
-                b[p++] = (byte)(value | 0x80);
-                value >>= 7;
+                p = WriteVarintAtMulti(ref b, p, value);
             }
-            while (value >= 0x80);
-            b[p++] = (byte)value;
             _offset = p;
             return;
         }
         WriteVarintSlow(value);
+    }
+
+    /// <summary>
+    /// Write a varint needing two or more bytes at <paramref name="p"/>, knowing
+    /// the buffer holds at least <see cref="MaxVarintBytes"/> bytes there, and
+    /// return the position just past it.
+    /// </summary>
+    /// <remarks>
+    /// The single-byte case — every small field header and small scalar, the case
+    /// the format is designed around (CORELIB_PLAN §1) — is deliberately *not*
+    /// handled here. Each caller tests <c>value &lt; 0x80</c> and does that store
+    /// itself, so the common field costs a compare and a store with no call at
+    /// all; only a genuinely multi-byte value reaches this method. (The test was a
+    /// shared <c>AggressiveInlining</c> helper at first; measured under Callgrind
+    /// the JIT declined to inline it — a helper containing a call is not inlined
+    /// here even when marked — which cost ~20 instructions per varint written.)
+    /// <para>
+    /// Unrolled rather than looped, for the same reason the decoder's reader is:
+    /// the shift is then an immediate and there is no counter to maintain or test.
+    /// </para>
+    /// <para>
+    /// The caller's single capacity check stands in for both the flush check and
+    /// the array bounds check a byte-at-a-time writer would pay per byte —
+    /// <c>_end</c> is always the buffer's length, so <c>p + 10 &lt;= _end</c> is
+    /// exactly the proof that ten stores from <paramref name="p"/> stay in range.
+    /// </para>
+    /// </remarks>
+    /// <param name="b">reference to the output buffer's first byte</param>
+    /// <param name="p">write position</param>
+    /// <param name="value">the unsigned value to encode (at least <c>0x80</c>)</param>
+    private static int WriteVarintAtMulti(ref byte b, int p, ulong value)
+    {
+        ref byte d = ref Unsafe.Add(ref b, (nint)(uint)p);
+        if (value < 0x4000)
+        {
+            // Two bytes: the next most common width after one, and cheaper as a
+            // pair of stores than as a word to assemble.
+            d = (byte)(value | 0x80);
+            Unsafe.Add(ref d, 1) = (byte)(value >> 7);
+            return p + 2;
+        }
+        if (value < 1UL << 56)
+        {
+            // Three to eight bytes: build the whole encoding in a register and
+            // store it in one go. The caller guaranteed ten bytes of room, so
+            // writing a full eight is always in range whatever the length is.
+            int n = ((VALUE_BITS - BitOperations.LeadingZeroCount(value)) + 6) / 7;
+            ulong x = ScatterPayload(value) | (ContinuationBits & ((1UL << ((n - 1) << 3)) - 1));
+            if (!BitConverter.IsLittleEndian)
+            {
+                x = BinaryPrimitives.ReverseEndianness(x);
+            }
+            Unsafe.WriteUnaligned(ref d, x);
+            return p + n;
+        }
+
+        // Nine or ten bytes: the first eight all continue, and what is left of the
+        // value past bit 55 needs one byte, or two when it reaches bit 63.
+        ulong head = ScatterPayload(value) | ContinuationBits;
+        if (!BitConverter.IsLittleEndian)
+        {
+            head = BinaryPrimitives.ReverseEndianness(head);
+        }
+        Unsafe.WriteUnaligned(ref d, head);
+        ulong tail = value >> 56;
+        if (tail < 0x80)
+        {
+            Unsafe.Add(ref d, 8) = (byte)tail;
+            return p + 9;
+        }
+        Unsafe.Add(ref d, 8) = (byte)(tail | 0x80);
+        Unsafe.Add(ref d, 9) = (byte)(tail >> 7);
+        return p + MaxVarintBytes;
+    }
+
+    /// <summary>
+    /// Spread the low 56 bits of <paramref name="value"/> into eight bytes, seven
+    /// payload bits per byte, leaving each continuation flag clear.
+    /// </summary>
+    /// <remarks>
+    /// The exact inverse of the decoder's gather (IStream): three shift-and-merge
+    /// steps open the one-bit gap each byte needs, splitting the value into 28-bit
+    /// halves, then 14-bit quarters, then the eight 7-bit groups. Bits above 55
+    /// are dropped, which is what lets the caller handle a nine- or ten-byte
+    /// encoding by writing this word and then the remaining byte or two.
+    /// </remarks>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static ulong ScatterPayload(ulong value)
+    {
+        ulong x = ((value & 0x00FFFFFFF0000000UL) << 4) | (value & 0x000000000FFFFFFFUL);
+        x = ((x & 0x0FFFC0000FFFC000UL) << 2) | (x & 0x00003FFF00003FFFUL);
+        return ((x & 0x3F803F803F803F80UL) << 1) | (x & 0x007F007F007F007FUL);
     }
 
     /// <summary>Buffer-spanning varint write: flushes mid-value when the buffer is tiny.</summary>
@@ -297,16 +435,22 @@ public sealed class OStream
     /// </exception>
     private void WriteIdType(int id, int wireType)
     {
-        if (id < 0 || id > ID_MAX)
+        if (id < 0)
         {
-            throw new SofabException(SofabError.Argument, "id " + id);
+            ThrowBadId(id);
         }
         if (_nPending != 0 && wireType != T_SEQUENCE_START && wireType != T_SEQUENCE_END)
         {
             CommitPending();
         }
-        WriteVarint(((ulong)id << 3) | (uint)wireType);
+        WriteVarint(((ulong)(uint)id << 3) | (uint)wireType);
     }
+
+
+    /// <summary>Raise <see cref="SofabError.Argument"/> for an out-of-range field id.</summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static void ThrowBadId(int id) =>
+        throw new SofabException(SofabError.Argument, "id " + id);
 
     /// <summary>Write out the held-back sequence headers, outermost first.</summary>
     /// <remarks>
@@ -315,13 +459,12 @@ public sealed class OStream
     /// </remarks>
     private void CommitPending()
     {
-        // Only reached with _nPending != 0, which implies the array exists.
-        int[] pending = _pending!;
         int n = _nPending;
         _nPending = 0;
         for (int i = 0; i < n; i++)
         {
-            WriteVarint(((ulong)pending[i] << 3) | T_SEQUENCE_START);
+            int id = i < InlinePendingCapacity ? _inlinePending[i] : _pending![i - InlinePendingCapacity];
+            WriteVarint(((ulong)(uint)id << 3) | T_SEQUENCE_START);
         }
     }
 
@@ -334,7 +477,42 @@ public sealed class OStream
     /// <param name="value">unsigned value</param>
     public void WriteUnsigned(int id, ulong value)
     {
-        WriteIdType(id, T_VARINT_UNSIGNED);
+        if (id < 0)
+        {
+            ThrowBadId(id);
+        }
+        if (_nPending != 0)
+        {
+            CommitPending();
+        }
+        ulong header = ((ulong)(uint)id << 3) | T_VARINT_UNSIGNED;
+        int p = _offset;
+        if (_end - p >= 2 * MaxVarintBytes)
+        {
+            ref byte b = ref MemoryMarshal.GetArrayDataReference(_buffer);
+            if (header < 0x80)
+            {
+                Unsafe.Add(ref b, (nint)(uint)p) = (byte)header;
+                p++;
+            }
+            else
+            {
+                p = WriteVarintAtMulti(ref b, p, header);
+            }
+            ulong v = value;
+            if (v < 0x80)
+            {
+                Unsafe.Add(ref b, (nint)(uint)p) = (byte)v;
+                p++;
+            }
+            else
+            {
+                p = WriteVarintAtMulti(ref b, p, v);
+            }
+            _offset = p;
+            return;
+        }
+        WriteVarint(header);
         WriteVarint(value);
     }
 
@@ -343,9 +521,45 @@ public sealed class OStream
     /// <param name="value">signed value</param>
     public void WriteSigned(int id, long value)
     {
-        WriteIdType(id, T_VARINT_SIGNED);
+        if (id < 0)
+        {
+            ThrowBadId(id);
+        }
+        if (_nPending != 0)
+        {
+            CommitPending();
+        }
+        ulong header = ((ulong)(uint)id << 3) | T_VARINT_SIGNED;
+        int p = _offset;
+        if (_end - p >= 2 * MaxVarintBytes)
+        {
+            ref byte b = ref MemoryMarshal.GetArrayDataReference(_buffer);
+            if (header < 0x80)
+            {
+                Unsafe.Add(ref b, (nint)(uint)p) = (byte)header;
+                p++;
+            }
+            else
+            {
+                p = WriteVarintAtMulti(ref b, p, header);
+            }
+            ulong v = ZigzagEncode(value);
+            if (v < 0x80)
+            {
+                Unsafe.Add(ref b, (nint)(uint)p) = (byte)v;
+                p++;
+            }
+            else
+            {
+                p = WriteVarintAtMulti(ref b, p, v);
+            }
+            _offset = p;
+            return;
+        }
+        WriteVarint(header);
         WriteVarint(ZigzagEncode(value));
     }
+
 
     /// <summary>Write a boolean as an unsigned <c>0</c> / <c>1</c>.</summary>
     /// <param name="id">field id</param>
@@ -373,8 +587,45 @@ public sealed class OStream
         {
             throw new SofabException(SofabError.Argument, "length " + length);
         }
-        WriteIdType(id, T_FIXLEN);
-        WriteVarint(((ulong)length << 3) | (uint)subtype.Raw());
+        if (id < 0)
+        {
+            ThrowBadId(id);
+        }
+        if (_nPending != 0)
+        {
+            CommitPending();
+        }
+        ulong header = ((ulong)(uint)id << 3) | T_FIXLEN;
+        ulong word = ((ulong)(uint)length << 3) | (uint)subtype.Raw();
+        int p = _offset;
+        if (_end - p >= 2 * MaxVarintBytes)
+        {
+            ref byte b = ref MemoryMarshal.GetArrayDataReference(_buffer);
+            if (header < 0x80)
+            {
+                Unsafe.Add(ref b, (nint)(uint)p) = (byte)header;
+                p++;
+            }
+            else
+            {
+                p = WriteVarintAtMulti(ref b, p, header);
+            }
+            if (word < 0x80)
+            {
+                Unsafe.Add(ref b, (nint)(uint)p) = (byte)word;
+                p++;
+            }
+            else
+            {
+                p = WriteVarintAtMulti(ref b, p, word);
+            }
+            _offset = p;
+        }
+        else
+        {
+            WriteVarint(header);
+            WriteVarint(word);
+        }
         PushRaw(data, from, length);
     }
 
@@ -384,7 +635,36 @@ public sealed class OStream
     public void WriteFp32(int id, float value)
     {
         int bits = BitConverter.SingleToInt32Bits(value);
-        WriteIdType(id, T_FIXLEN);
+        if (id < 0)
+        {
+            ThrowBadId(id);
+        }
+        if (_nPending != 0)
+        {
+            CommitPending();
+        }
+        ulong header = ((ulong)(uint)id << 3) | T_FIXLEN;
+        int p = _offset;
+        if (_end - p >= MaxVarintBytes + 1 + 4)
+        {
+            // The fixlen_word for an fp32 is always the single byte (4 << 3) | 0.
+            ref byte b = ref MemoryMarshal.GetArrayDataReference(_buffer);
+            if (header < 0x80)
+            {
+                Unsafe.Add(ref b, (nint)(uint)p) = (byte)header;
+                p++;
+            }
+            else
+            {
+                p = WriteVarintAtMulti(ref b, p, header);
+            }
+            Unsafe.Add(ref b, (nint)(uint)p) = (4 << 3) | (byte)FixlenType.Fp32;
+            BinaryPrimitives.WriteInt32LittleEndian(
+                MemoryMarshal.CreateSpan(ref Unsafe.Add(ref b, (nint)(uint)(p + 1)), 4), bits);
+            _offset = p + 5;
+            return;
+        }
+        WriteVarint(header);
         WriteVarint((4UL << 3) | (uint)FixlenType.Fp32.Raw());
         PutLe32(bits);
     }
@@ -427,7 +707,36 @@ public sealed class OStream
     public void WriteFp64(int id, double value)
     {
         long bits = BitConverter.DoubleToInt64Bits(value);
-        WriteIdType(id, T_FIXLEN);
+        if (id < 0)
+        {
+            ThrowBadId(id);
+        }
+        if (_nPending != 0)
+        {
+            CommitPending();
+        }
+        ulong header = ((ulong)(uint)id << 3) | T_FIXLEN;
+        int p = _offset;
+        if (_end - p >= MaxVarintBytes + 1 + 8)
+        {
+            // The fixlen_word for an fp64 is always the single byte (8 << 3) | 1.
+            ref byte b = ref MemoryMarshal.GetArrayDataReference(_buffer);
+            if (header < 0x80)
+            {
+                Unsafe.Add(ref b, (nint)(uint)p) = (byte)header;
+                p++;
+            }
+            else
+            {
+                p = WriteVarintAtMulti(ref b, p, header);
+            }
+            Unsafe.Add(ref b, (nint)(uint)p) = (8 << 3) | (byte)FixlenType.Fp64;
+            BinaryPrimitives.WriteInt64LittleEndian(
+                MemoryMarshal.CreateSpan(ref Unsafe.Add(ref b, (nint)(uint)(p + 1)), 8), bits);
+            _offset = p + 9;
+            return;
+        }
+        WriteVarint(header);
         WriteVarint((8UL << 3) | (uint)FixlenType.Fp64.Raw());
         PutLe64(bits);
     }
@@ -448,6 +757,74 @@ public sealed class OStream
         // runtime encoder write in place when the buffer has room. The strict
         // codec throws on an unpaired surrogate rather than emitting U+FFFD, so an
         // invalid string is rejected up front — before any header is written.
+        if (text == null)
+        {
+            throw new ArgumentNullException(nameof(text));
+        }
+
+        // ASCII fast path. Every char below U+0080 encodes to itself as one byte,
+        // so the payload length is known up front (the char count) and no
+        // surrogate can be involved — the two facts the general path pays
+        // Encoding.GetByteCount and Encoding.GetBytes to establish. Nothing is
+        // committed until the whole string is confirmed ASCII: _offset only moves
+        // on success, so a non-ASCII char anywhere simply falls through below.
+        // Bounded by AsciiFastPathMaxChars because past that the runtime's
+        // vectorized transcoder wins over this scalar loop.
+        if (text.Length <= AsciiFastPathMaxChars)
+        {
+            if (id < 0)
+        {
+            ThrowBadId(id);
+        }
+        if (_nPending != 0)
+        {
+            CommitPending();
+        }
+            int len = text.Length;
+            int p = _offset;
+            if (_end - p >= (2 * MaxVarintBytes) + len)
+            {
+                ref byte b = ref MemoryMarshal.GetArrayDataReference(_buffer);
+                ref char src = ref MemoryMarshal.GetReference(text.AsSpan());
+                ulong header = ((ulong)(uint)id << 3) | T_FIXLEN;
+                if (header < 0x80)
+                {
+                    Unsafe.Add(ref b, (nint)(uint)p) = (byte)header;
+                    p++;
+                }
+                else
+                {
+                    p = WriteVarintAtMulti(ref b, p, header);
+                }
+                ulong word = ((ulong)(uint)len << 3) | (uint)FixlenType.String.Raw();
+                if (word < 0x80)
+                {
+                    Unsafe.Add(ref b, (nint)(uint)p) = (byte)word;
+                    p++;
+                }
+                else
+                {
+                    p = WriteVarintAtMulti(ref b, p, word);
+                }
+                ref byte dst = ref Unsafe.Add(ref b, (nint)(uint)p);
+                int i = 0;
+                for (; i < len; i++)
+                {
+                    char c = Unsafe.Add(ref src, i);
+                    if (c >= 0x80)
+                    {
+                        break;
+                    }
+                    Unsafe.Add(ref dst, i) = (byte)c;
+                }
+                if (i == len)
+                {
+                    _offset = p + len;
+                    return;
+                }
+            }
+        }
+
         int n;
         try
         {
@@ -499,7 +876,42 @@ public sealed class OStream
     /// exactly <c>[ header ][ count=0 ]</c> with no elements, per §4.7)</param>
     private void WriteArrayHeader(int id, int wireType, int count)
     {
-        WriteIdType(id, wireType);
+        if (id < 0)
+        {
+            ThrowBadId(id);
+        }
+        if (_nPending != 0)
+        {
+            CommitPending();
+        }
+        ulong header = ((ulong)(uint)id << 3) | (uint)wireType;
+        int p = _offset;
+        if (_end - p >= 2 * MaxVarintBytes)
+        {
+            ref byte b = ref MemoryMarshal.GetArrayDataReference(_buffer);
+            if (header < 0x80)
+            {
+                Unsafe.Add(ref b, (nint)(uint)p) = (byte)header;
+                p++;
+            }
+            else
+            {
+                p = WriteVarintAtMulti(ref b, p, header);
+            }
+            ulong countWord = (uint)count;
+            if (countWord < 0x80)
+            {
+                Unsafe.Add(ref b, (nint)(uint)p) = (byte)countWord;
+                p++;
+            }
+            else
+            {
+                p = WriteVarintAtMulti(ref b, p, countWord);
+            }
+            _offset = p;
+            return;
+        }
+        WriteVarint(header);
         WriteVarint((uint)count);
     }
 
@@ -509,28 +921,50 @@ public sealed class OStream
     public void WriteArrayUnsigned(int id, byte[] data)
     {
         WriteArrayHeader(id, T_VARINTARRAY_UNSIGNED, data.Length);
-        byte[] b = _buffer;
         int p = _offset;
         int e = _end;
+        ref byte b = ref MemoryMarshal.GetArrayDataReference(_buffer);
+        // One capacity check for the whole run when the buffer can hold the worst
+        // case (10 bytes per element): the element loop is then pure encoding.
+        if ((long)(e - p) >= (long)data.Length * MaxVarintBytes)
+        {
+            foreach (byte elem in data)
+            {
+                if (elem < 0x80)
+                {
+                    Unsafe.Add(ref b, (nint)(uint)p) = (byte)elem;
+                    p++;
+                }
+                else
+                {
+                    p = WriteVarintAtMulti(ref b, p, elem);
+                }
+            }
+            _offset = p;
+            return;
+        }
         foreach (byte elem in data)
-        {{
+        {
             ulong v = elem;
-            if (e - p < 10)
-            {{
+            if (e - p < MaxVarintBytes)
+            {
                 _offset = p;
                 WriteVarintSlow(v);
-                b = _buffer;
+                b = ref MemoryMarshal.GetArrayDataReference(_buffer);
                 p = _offset;
                 e = _end;
                 continue;
-            }}
-            while (v >= 0x80)
-            {{
-                b[p++] = (byte)(v | 0x80);
-                v >>= 7;
-            }}
-            b[p++] = (byte)v;
-        }}
+            }
+            if (v < 0x80)
+            {
+                Unsafe.Add(ref b, (nint)(uint)p) = (byte)v;
+                p++;
+            }
+            else
+            {
+                p = WriteVarintAtMulti(ref b, p, v);
+            }
+        }
         _offset = p;
     }
 
@@ -540,28 +974,50 @@ public sealed class OStream
     public void WriteArrayUnsigned(int id, ushort[] data)
     {
         WriteArrayHeader(id, T_VARINTARRAY_UNSIGNED, data.Length);
-        byte[] b = _buffer;
         int p = _offset;
         int e = _end;
+        ref byte b = ref MemoryMarshal.GetArrayDataReference(_buffer);
+        // One capacity check for the whole run when the buffer can hold the worst
+        // case (10 bytes per element): the element loop is then pure encoding.
+        if ((long)(e - p) >= (long)data.Length * MaxVarintBytes)
+        {
+            foreach (ushort elem in data)
+            {
+                if (elem < 0x80)
+                {
+                    Unsafe.Add(ref b, (nint)(uint)p) = (byte)elem;
+                    p++;
+                }
+                else
+                {
+                    p = WriteVarintAtMulti(ref b, p, elem);
+                }
+            }
+            _offset = p;
+            return;
+        }
         foreach (ushort elem in data)
-        {{
+        {
             ulong v = elem;
-            if (e - p < 10)
-            {{
+            if (e - p < MaxVarintBytes)
+            {
                 _offset = p;
                 WriteVarintSlow(v);
-                b = _buffer;
+                b = ref MemoryMarshal.GetArrayDataReference(_buffer);
                 p = _offset;
                 e = _end;
                 continue;
-            }}
-            while (v >= 0x80)
-            {{
-                b[p++] = (byte)(v | 0x80);
-                v >>= 7;
-            }}
-            b[p++] = (byte)v;
-        }}
+            }
+            if (v < 0x80)
+            {
+                Unsafe.Add(ref b, (nint)(uint)p) = (byte)v;
+                p++;
+            }
+            else
+            {
+                p = WriteVarintAtMulti(ref b, p, v);
+            }
+        }
         _offset = p;
     }
 
@@ -571,28 +1027,50 @@ public sealed class OStream
     public void WriteArrayUnsigned(int id, uint[] data)
     {
         WriteArrayHeader(id, T_VARINTARRAY_UNSIGNED, data.Length);
-        byte[] b = _buffer;
         int p = _offset;
         int e = _end;
+        ref byte b = ref MemoryMarshal.GetArrayDataReference(_buffer);
+        // One capacity check for the whole run when the buffer can hold the worst
+        // case (10 bytes per element): the element loop is then pure encoding.
+        if ((long)(e - p) >= (long)data.Length * MaxVarintBytes)
+        {
+            foreach (uint elem in data)
+            {
+                if (elem < 0x80)
+                {
+                    Unsafe.Add(ref b, (nint)(uint)p) = (byte)elem;
+                    p++;
+                }
+                else
+                {
+                    p = WriteVarintAtMulti(ref b, p, elem);
+                }
+            }
+            _offset = p;
+            return;
+        }
         foreach (uint elem in data)
-        {{
+        {
             ulong v = elem;
-            if (e - p < 10)
-            {{
+            if (e - p < MaxVarintBytes)
+            {
                 _offset = p;
                 WriteVarintSlow(v);
-                b = _buffer;
+                b = ref MemoryMarshal.GetArrayDataReference(_buffer);
                 p = _offset;
                 e = _end;
                 continue;
-            }}
-            while (v >= 0x80)
-            {{
-                b[p++] = (byte)(v | 0x80);
-                v >>= 7;
-            }}
-            b[p++] = (byte)v;
-        }}
+            }
+            if (v < 0x80)
+            {
+                Unsafe.Add(ref b, (nint)(uint)p) = (byte)v;
+                p++;
+            }
+            else
+            {
+                p = WriteVarintAtMulti(ref b, p, v);
+            }
+        }
         _offset = p;
     }
 
@@ -602,28 +1080,50 @@ public sealed class OStream
     public void WriteArrayUnsigned(int id, ulong[] data)
     {
         WriteArrayHeader(id, T_VARINTARRAY_UNSIGNED, data.Length);
-        byte[] b = _buffer;
         int p = _offset;
         int e = _end;
+        ref byte b = ref MemoryMarshal.GetArrayDataReference(_buffer);
+        // One capacity check for the whole run when the buffer can hold the worst
+        // case (10 bytes per element): the element loop is then pure encoding.
+        if ((long)(e - p) >= (long)data.Length * MaxVarintBytes)
+        {
+            foreach (ulong elem in data)
+            {
+                if (elem < 0x80)
+                {
+                    Unsafe.Add(ref b, (nint)(uint)p) = (byte)elem;
+                    p++;
+                }
+                else
+                {
+                    p = WriteVarintAtMulti(ref b, p, elem);
+                }
+            }
+            _offset = p;
+            return;
+        }
         foreach (ulong elem in data)
-        {{
+        {
             ulong v = elem;
-            if (e - p < 10)
-            {{
+            if (e - p < MaxVarintBytes)
+            {
                 _offset = p;
                 WriteVarintSlow(v);
-                b = _buffer;
+                b = ref MemoryMarshal.GetArrayDataReference(_buffer);
                 p = _offset;
                 e = _end;
                 continue;
-            }}
-            while (v >= 0x80)
-            {{
-                b[p++] = (byte)(v | 0x80);
-                v >>= 7;
-            }}
-            b[p++] = (byte)v;
-        }}
+            }
+            if (v < 0x80)
+            {
+                Unsafe.Add(ref b, (nint)(uint)p) = (byte)v;
+                p++;
+            }
+            else
+            {
+                p = WriteVarintAtMulti(ref b, p, v);
+            }
+        }
         _offset = p;
     }
 
@@ -633,28 +1133,51 @@ public sealed class OStream
     public void WriteArraySigned(int id, sbyte[] data)
     {
         WriteArrayHeader(id, T_VARINTARRAY_SIGNED, data.Length);
-        byte[] b = _buffer;
         int p = _offset;
         int e = _end;
+        ref byte b = ref MemoryMarshal.GetArrayDataReference(_buffer);
+        // One capacity check for the whole run when the buffer can hold the worst
+        // case (10 bytes per element): the element loop is then pure encoding.
+        if ((long)(e - p) >= (long)data.Length * MaxVarintBytes)
+        {
+            foreach (sbyte elem in data)
+            {
+                ulong zz = ZigzagEncode(elem);
+                if (zz < 0x80)
+                {
+                    Unsafe.Add(ref b, (nint)(uint)p) = (byte)zz;
+                    p++;
+                }
+                else
+                {
+                    p = WriteVarintAtMulti(ref b, p, zz);
+                }
+            }
+            _offset = p;
+            return;
+        }
         foreach (sbyte elem in data)
-        {{
+        {
             ulong v = ZigzagEncode(elem);
-            if (e - p < 10)
-            {{
+            if (e - p < MaxVarintBytes)
+            {
                 _offset = p;
                 WriteVarintSlow(v);
-                b = _buffer;
+                b = ref MemoryMarshal.GetArrayDataReference(_buffer);
                 p = _offset;
                 e = _end;
                 continue;
-            }}
-            while (v >= 0x80)
-            {{
-                b[p++] = (byte)(v | 0x80);
-                v >>= 7;
-            }}
-            b[p++] = (byte)v;
-        }}
+            }
+            if (v < 0x80)
+            {
+                Unsafe.Add(ref b, (nint)(uint)p) = (byte)v;
+                p++;
+            }
+            else
+            {
+                p = WriteVarintAtMulti(ref b, p, v);
+            }
+        }
         _offset = p;
     }
 
@@ -664,28 +1187,51 @@ public sealed class OStream
     public void WriteArraySigned(int id, short[] data)
     {
         WriteArrayHeader(id, T_VARINTARRAY_SIGNED, data.Length);
-        byte[] b = _buffer;
         int p = _offset;
         int e = _end;
+        ref byte b = ref MemoryMarshal.GetArrayDataReference(_buffer);
+        // One capacity check for the whole run when the buffer can hold the worst
+        // case (10 bytes per element): the element loop is then pure encoding.
+        if ((long)(e - p) >= (long)data.Length * MaxVarintBytes)
+        {
+            foreach (short elem in data)
+            {
+                ulong zz = ZigzagEncode(elem);
+                if (zz < 0x80)
+                {
+                    Unsafe.Add(ref b, (nint)(uint)p) = (byte)zz;
+                    p++;
+                }
+                else
+                {
+                    p = WriteVarintAtMulti(ref b, p, zz);
+                }
+            }
+            _offset = p;
+            return;
+        }
         foreach (short elem in data)
-        {{
+        {
             ulong v = ZigzagEncode(elem);
-            if (e - p < 10)
-            {{
+            if (e - p < MaxVarintBytes)
+            {
                 _offset = p;
                 WriteVarintSlow(v);
-                b = _buffer;
+                b = ref MemoryMarshal.GetArrayDataReference(_buffer);
                 p = _offset;
                 e = _end;
                 continue;
-            }}
-            while (v >= 0x80)
-            {{
-                b[p++] = (byte)(v | 0x80);
-                v >>= 7;
-            }}
-            b[p++] = (byte)v;
-        }}
+            }
+            if (v < 0x80)
+            {
+                Unsafe.Add(ref b, (nint)(uint)p) = (byte)v;
+                p++;
+            }
+            else
+            {
+                p = WriteVarintAtMulti(ref b, p, v);
+            }
+        }
         _offset = p;
     }
 
@@ -695,28 +1241,51 @@ public sealed class OStream
     public void WriteArraySigned(int id, int[] data)
     {
         WriteArrayHeader(id, T_VARINTARRAY_SIGNED, data.Length);
-        byte[] b = _buffer;
         int p = _offset;
         int e = _end;
+        ref byte b = ref MemoryMarshal.GetArrayDataReference(_buffer);
+        // One capacity check for the whole run when the buffer can hold the worst
+        // case (10 bytes per element): the element loop is then pure encoding.
+        if ((long)(e - p) >= (long)data.Length * MaxVarintBytes)
+        {
+            foreach (int elem in data)
+            {
+                ulong zz = ZigzagEncode(elem);
+                if (zz < 0x80)
+                {
+                    Unsafe.Add(ref b, (nint)(uint)p) = (byte)zz;
+                    p++;
+                }
+                else
+                {
+                    p = WriteVarintAtMulti(ref b, p, zz);
+                }
+            }
+            _offset = p;
+            return;
+        }
         foreach (int elem in data)
-        {{
+        {
             ulong v = ZigzagEncode(elem);
-            if (e - p < 10)
-            {{
+            if (e - p < MaxVarintBytes)
+            {
                 _offset = p;
                 WriteVarintSlow(v);
-                b = _buffer;
+                b = ref MemoryMarshal.GetArrayDataReference(_buffer);
                 p = _offset;
                 e = _end;
                 continue;
-            }}
-            while (v >= 0x80)
-            {{
-                b[p++] = (byte)(v | 0x80);
-                v >>= 7;
-            }}
-            b[p++] = (byte)v;
-        }}
+            }
+            if (v < 0x80)
+            {
+                Unsafe.Add(ref b, (nint)(uint)p) = (byte)v;
+                p++;
+            }
+            else
+            {
+                p = WriteVarintAtMulti(ref b, p, v);
+            }
+        }
         _offset = p;
     }
 
@@ -726,28 +1295,51 @@ public sealed class OStream
     public void WriteArraySigned(int id, long[] data)
     {
         WriteArrayHeader(id, T_VARINTARRAY_SIGNED, data.Length);
-        byte[] b = _buffer;
         int p = _offset;
         int e = _end;
+        ref byte b = ref MemoryMarshal.GetArrayDataReference(_buffer);
+        // One capacity check for the whole run when the buffer can hold the worst
+        // case (10 bytes per element): the element loop is then pure encoding.
+        if ((long)(e - p) >= (long)data.Length * MaxVarintBytes)
+        {
+            foreach (long elem in data)
+            {
+                ulong zz = ZigzagEncode(elem);
+                if (zz < 0x80)
+                {
+                    Unsafe.Add(ref b, (nint)(uint)p) = (byte)zz;
+                    p++;
+                }
+                else
+                {
+                    p = WriteVarintAtMulti(ref b, p, zz);
+                }
+            }
+            _offset = p;
+            return;
+        }
         foreach (long elem in data)
-        {{
+        {
             ulong v = ZigzagEncode(elem);
-            if (e - p < 10)
-            {{
+            if (e - p < MaxVarintBytes)
+            {
                 _offset = p;
                 WriteVarintSlow(v);
-                b = _buffer;
+                b = ref MemoryMarshal.GetArrayDataReference(_buffer);
                 p = _offset;
                 e = _end;
                 continue;
-            }}
-            while (v >= 0x80)
-            {{
-                b[p++] = (byte)(v | 0x80);
-                v >>= 7;
-            }}
-            b[p++] = (byte)v;
-        }}
+            }
+            if (v < 0x80)
+            {
+                Unsafe.Add(ref b, (nint)(uint)p) = (byte)v;
+                p++;
+            }
+            else
+            {
+                p = WriteVarintAtMulti(ref b, p, v);
+            }
+        }
         _offset = p;
     }
 
@@ -761,6 +1353,24 @@ public sealed class OStream
         // A fixlen array always carries its fixlen_word, even when empty (§4.8),
         // so an empty fp32 array is distinguishable from an empty fp64 array.
         WriteVarint((4UL << 3) | (uint)FixlenType.Fp32.Raw());
+        int p = _offset;
+        if ((long)(_end - p) >= (long)data.Length * 4)
+        {
+            // Room for every element: write the payload with no per-element
+            // capacity check and no per-element span construction.
+            ref byte b = ref MemoryMarshal.GetArrayDataReference(_buffer);
+            foreach (float v in data)
+            {
+                Unsafe.WriteUnaligned(
+                    ref Unsafe.Add(ref b, (nint)(uint)p),
+                    BitConverter.IsLittleEndian
+                        ? BitConverter.SingleToInt32Bits(v)
+                        : BinaryPrimitives.ReverseEndianness(BitConverter.SingleToInt32Bits(v)));
+                p += 4;
+            }
+            _offset = p;
+            return;
+        }
         foreach (float v in data)
         {
             PutLe32(BitConverter.SingleToInt32Bits(v));
@@ -777,6 +1387,24 @@ public sealed class OStream
         // A fixlen array always carries its fixlen_word, even when empty (§4.8),
         // so an empty fp64 array is distinguishable from an empty fp32 array.
         WriteVarint((8UL << 3) | (uint)FixlenType.Fp64.Raw());
+        int p = _offset;
+        if ((long)(_end - p) >= (long)data.Length * 8)
+        {
+            // Room for every element: write the payload with no per-element
+            // capacity check and no per-element span construction.
+            ref byte b = ref MemoryMarshal.GetArrayDataReference(_buffer);
+            foreach (double v in data)
+            {
+                Unsafe.WriteUnaligned(
+                    ref Unsafe.Add(ref b, (nint)(uint)p),
+                    BitConverter.IsLittleEndian
+                        ? BitConverter.DoubleToInt64Bits(v)
+                        : BinaryPrimitives.ReverseEndianness(BitConverter.DoubleToInt64Bits(v)));
+                p += 8;
+            }
+            _offset = p;
+            return;
+        }
         foreach (double v in data)
         {
             PutLe64(BitConverter.DoubleToInt64Bits(v));
@@ -840,15 +1468,25 @@ public sealed class OStream
         // no depth at which a sequence gets framed eagerly and no fallback path
         // that could break "pending is a contiguous suffix of the open sequences".
         // MAX_DEPTH above already caps this at 255 entries.
-        if (_pending == null)
+        int n = _nPending;
+        if (n < InlinePendingCapacity)
         {
-            _pending = new int[InitialPendingCapacity];
+            _inlinePending[n] = id;
         }
-        else if (_nPending == _pending.Length)
+        else
         {
-            Array.Resize(ref _pending, _pending.Length * 2);
+            int spill = n - InlinePendingCapacity;
+            if (_pending == null)
+            {
+                _pending = new int[InitialPendingCapacity];
+            }
+            else if (spill == _pending.Length)
+            {
+                Array.Resize(ref _pending, _pending.Length * 2);
+            }
+            _pending[spill] = id;
         }
-        _pending[_nPending++] = id;
+        _nPending = n + 1;
         _depth++;
     }
 
