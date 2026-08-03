@@ -332,7 +332,12 @@ public sealed class IStream
 
         int wireType = (int)(header & 0x07);
         ulong idValue = header >> 3;
-        if (idValue > (ulong)ID_MAX)
+        // ID_MAX bounds the id of a value-bearing header only (§6.2). A
+        // sequence end carries no id -- its id sub-field exists solely to keep
+        // the header format uniform, and a decoder must accept any value there,
+        // discard it and re-encode the marker as 0x07 (§4.9). The header varint
+        // itself stays bounded by §4.1, which ReadVarint* already enforces.
+        if (idValue > (ulong)ID_MAX && wireType != T_SEQUENCE_END)
         {
             throw new SofabException(SofabError.InvalidMessage, "id " + idValue);
         }
@@ -1015,7 +1020,9 @@ public sealed class IStream
         ulong header = _varintOut;
         int wireType = (int)(header & 0x07);
         ulong idValue = header >> 3;
-        if (idValue > (ulong)ID_MAX)
+        // A sequence end's id is discarded, so ID_MAX does not bound it -- see
+        // the matching note in FastField (§4.9, §6.2).
+        if (idValue > (ulong)ID_MAX && wireType != T_SEQUENCE_END)
         {
             throw new SofabException(SofabError.InvalidMessage, "id " + idValue);
         }
