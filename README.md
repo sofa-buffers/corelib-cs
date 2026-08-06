@@ -162,6 +162,12 @@ var sink = new My();
 new IStream().Feed(buf, 0, used, sink);
 ```
 
+A field that declares a size is announced on the word that declares it, before
+any payload: `ArrayBegin(id, kind, count)` for an array, `FixlenBegin(id,
+subtype, total)` for a string / blob / float. That is where a schema `count` or
+`maxlen` bound belongs — judged there, the verdict cannot depend on where the
+input happened to be chunked (CORELIB_PLAN §5.2).
+
 ### Deserialize stream
 
 `IStream` keeps all parse state internally, so feed it whatever bytes you have —
