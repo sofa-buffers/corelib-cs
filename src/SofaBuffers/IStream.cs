@@ -40,7 +40,10 @@ namespace sofab;
 /// does not care about. Scalars and floats are delivered whole; string / blob
 /// payloads are delivered in chunks (so they may exceed RAM); array elements are
 /// announced with <see cref="IVisitor.ArrayBegin"/> and then delivered through
-/// the scalar / float callbacks.
+/// the scalar / float callbacks. Every fixlen field is likewise announced with
+/// <see cref="IVisitor.FixlenBegin"/> on its length word, before any payload
+/// byte, so a schema <c>maxlen</c> bound is judged at the word that violates it
+/// rather than at whichever payload byte happens to arrive first.
 /// </para>
 /// <para>
 /// <b>Hot-path convention.</b> <see cref="Feed(byte[], int, int, IVisitor)"/>
@@ -447,6 +450,13 @@ public sealed class IStream
         }
         int length = (int)lengthValue;
 
+        // FixlenBegin is announced below, per arm, and deliberately NOT here:
+        // every `return 0` in this method means "field not fully present, no
+        // callback emitted, no state mutated", after which the byte machine
+        // re-parses the same bytes from the header and announces the field from
+        // StepFixlenLen. Announcing before such a return would fire the hook
+        // twice for one field. The hook still cannot be missed: a message ending
+        // at the length word is exactly the case the byte machine picks up.
         switch (subtype)
         {
             case FixlenType.Fp32:
@@ -458,6 +468,7 @@ public sealed class IStream
                 {
                     return 0;
                 }
+                visitor.FixlenBegin(id, subtype, 4);
                 visitor.Fp32(id, BitConverter.Int32BitsToSingle(ReadInt32Le(data, p)));
                 return p + 4 - start;
             case FixlenType.Fp64:
@@ -469,12 +480,14 @@ public sealed class IStream
                 {
                     return 0;
                 }
+                visitor.FixlenBegin(id, subtype, 8);
                 visitor.Fp64(id, BitConverter.Int64BitsToDouble(ReadInt64Le(data, p)));
                 return p + 8 - start;
             case FixlenType.String:
             case FixlenType.Blob:
                 if (length == 0)
                 {
+                    visitor.FixlenBegin(id, subtype, 0);
                     if (subtype == FixlenType.String)
                     {
                         visitor.String(id, 0, 0, EmptyPayload, 0, 0);
@@ -492,6 +505,7 @@ public sealed class IStream
                 {
                     return 0;
                 }
+                visitor.FixlenBegin(id, subtype, length);
                 if (subtype == FixlenType.String)
                 {
                     visitor.String(id, length, 0, data, p, length);
@@ -1124,8 +1138,10 @@ public sealed class IStream
     /// zero-length string/blob is emitted immediately as an empty chunk; a
     /// non-empty string/blob transitions to <c>FixlenRaw</c> for chunked streaming.
     /// String/blob sub-types are rejected when reached as a fixlen-array element.
-    /// For a fixlen array this is also where <see cref="IVisitor.ArrayBegin"/>
-    /// fires, once the validated word has named the element subtype (§4.8).
+    /// This is also where the field's header hook fires, once the validated word
+    /// has named the subtype and length: <see cref="IVisitor.FixlenBegin"/> for a
+    /// scalar fixlen field, or <see cref="IVisitor.ArrayBegin"/> for a fixlen
+    /// array (§4.8) — one field, one hook, always before any payload byte.
     /// </summary>
     /// <param name="b">the next input byte</param>
     /// <param name="visitor">sink for decoded fields</param>
@@ -1154,6 +1170,10 @@ public sealed class IStream
         _accLen = 0;
         _accBits = 0;
 
+        // Everything the FORMAT rejects is judged here, ahead of either hook: a
+        // reserved subtype (above), a wrong-width float (§4.6) and a dynamic
+        // subtype used as a fixlen-array element (§4.8) are INVALID regardless
+        // of what follows, never a §7.3 skip the receiver gets a say in.
         switch (subtype)
         {
             case FixlenType.Fp32:
@@ -1174,32 +1194,41 @@ public sealed class IStream
                 break;
             case FixlenType.String:
             case FixlenType.Blob:
-                // String/blob are not valid as fixlen-array elements. §4.8 allows
-                // only fixed-width subtypes here, so this is a FORMAT violation
-                // judged before the hook fires -- never a §7.3 skip.
                 if (_inArray)
                 {
                     throw new SofabException(SofabError.InvalidMessage, "dynamic fixlen array element");
                 }
-                if (length == 0)
-                {
-                    if (subtype == FixlenType.String)
-                    {
-                        visitor.String(_id, 0, 0, EmptyPayload, 0, 0);
-                    }
-                    else
-                    {
-                        visitor.Blob(_id, 0, 0, EmptyPayload, 0, 0);
-                    }
-                    _state = State.Idle;
-                }
-                else
-                {
-                    _state = State.FixlenRaw;
-                }
+                // A non-empty payload streams through FixlenRaw; an empty one has
+                // no payload state at all and is emitted below, after the field
+                // has been announced.
+                _state = length == 0 ? State.Idle : State.FixlenRaw;
                 break;
             default:
                 throw new SofabException(SofabError.InvalidMessage, "fixlen type");
+        }
+
+        // The word is read and validated, so the field's declared length is now
+        // established -- announce it before a single payload byte is consumed or
+        // waited for. This is the whole point of the hook: a maxlen violation is
+        // decided by this word, so it must be decidable here, whether or not the
+        // message ends right at it (§5.2, INVALID over INCOMPLETE). A fixlen
+        // ARRAY is announced by ArrayBegin below instead -- its ArrayKind already
+        // names the element subtype, and one field gets one header hook.
+        if (!_inArray)
+        {
+            visitor.FixlenBegin(_id, subtype, length);
+        }
+
+        if (length == 0 && (subtype == FixlenType.String || subtype == FixlenType.Blob))
+        {
+            if (subtype == FixlenType.String)
+            {
+                visitor.String(_id, 0, 0, EmptyPayload, 0, 0);
+            }
+            else
+            {
+                visitor.Blob(_id, 0, 0, EmptyPayload, 0, 0);
+            }
         }
 
         // The fixlen_word of a fixlen array has now been consumed and validated,

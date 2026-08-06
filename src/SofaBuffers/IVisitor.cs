@@ -27,6 +27,14 @@ namespace sofab;
 /// scalar / float callbacks with the same <c>id</c>.
 /// </para>
 /// <para>
+/// <b>Header hooks.</b> A field that declares a size is announced on the
+/// <em>word that declares it</em>, ahead of any payload: <see cref="ArrayBegin"/>
+/// for an array's element count, and <see cref="FixlenBegin"/> for a fixlen
+/// field's byte length. A receiver holding a schema <c>count</c> / <c>maxlen</c>
+/// bound judges it there, so the verdict cannot depend on where the input was
+/// chunked (CORELIB_PLAN §5.2, §6.4).
+/// </para>
+/// <para>
 /// <b>Buffer ownership.</b> The <c>data</c> array handed to <see cref="String"/>
 /// and <see cref="Blob"/> is the caller's input buffer; it is only valid for the
 /// duration of the call. A visitor that needs to retain bytes must copy the
@@ -88,6 +96,53 @@ public interface IVisitor
     /// <param name="chunkOffset">start of the chunk within <c>data</c></param>
     /// <param name="chunkLength">number of bytes in the chunk</param>
     void Blob(int id, int total, int offset, byte[] data, int chunkOffset, int chunkLength)
+    {
+    }
+
+    /// <summary>
+    /// Start of a fixed-length field, announced once the <c>fixlen_word</c> has
+    /// been read and validated and before any payload byte is delivered.
+    /// </summary>
+    /// <remarks>
+    /// Called exactly once per fixlen field — <c>fp32</c>, <c>fp64</c>,
+    /// <c>string</c> and <c>blob</c> alike, <paramref name="total"/> <c>== 0</c>
+    /// included — always before the matching <see cref="Fp32"/> /
+    /// <see cref="Fp64"/> / <see cref="String"/> / <see cref="Blob"/> call, and
+    /// never per payload chunk. This is the <see cref="ArrayBegin"/> of the
+    /// fixlen world, and it exists for the same reason.
+    /// <para>
+    /// <b>Why the decoder has to be the one to say it.</b> A schema
+    /// <c>maxlen</c> bound is fully established by the length word: the number
+    /// that exceeds it is already on the wire, and no later byte can make it
+    /// legal. CORELIB_PLAN §5.2 makes <c>INVALID</c> dominate <c>INCOMPLETE</c>,
+    /// so a message ending exactly at that word is malformed — but the payload
+    /// callbacks carry <c>total</c> only once payload bytes exist, so such a
+    /// message would deliver no event at all and degrade to <c>INCOMPLETE</c>.
+    /// The verdict would then depend on where the input happened to be chunked,
+    /// which §6.4 and §7.2 forbid outright. Raising from this callback is what
+    /// turns the field into <c>INVALID</c> at the only point where that decision
+    /// is chunk-independent.
+    /// </para>
+    /// <para>
+    /// <paramref name="subtype"/> is the subtype that <em>arrived</em>, not the
+    /// one that was <em>declared</em> — the corelib is schema-agnostic. A
+    /// receiver whose schema names a different subtype must treat the field as a
+    /// MESSAGE_SPEC §7.3 skip and <em>not</em> measure it against this field's
+    /// bound, exactly as it does for a mistyped <see cref="ArrayBegin"/>. What
+    /// the format itself rejects — a reserved subtype, or an <c>fp32</c>/
+    /// <c>fp64</c> of the wrong width (§4.6) — is <c>INVALID</c> and is judged
+    /// before this call, so a subtype seen here is always one of the four.
+    /// </para>
+    /// <para>
+    /// A fixlen <em>array</em> is announced by <see cref="ArrayBegin"/> instead,
+    /// whose <see cref="ArrayKind"/> already carries the element subtype; its
+    /// shared <c>fixlen_word</c> does not raise this hook.
+    /// </para>
+    /// </remarks>
+    /// <param name="id">field id</param>
+    /// <param name="subtype">the resolved fixlen subtype that arrived on the wire</param>
+    /// <param name="total">declared payload length in bytes (4 / 8 for a float)</param>
+    void FixlenBegin(int id, FixlenType subtype, int total)
     {
     }
 
