@@ -218,6 +218,19 @@ whether a trailing `Incomplete` is a truncation for its protocol. Genuinely
 malformed input — regardless of what follows — still throws `SofabException`
 with `SofabError.InvalidMessage`.
 
+**That rejection is terminal** (CORELIB_PLAN §5.2 lists `INVALID` as *"no —
+terminal"*). Once a `Feed` has thrown `InvalidMessage`, the `IStream` latches the
+verdict: `Status` answers `DecodeStatus.Invalid` from then on, and every later
+`Feed` throws `InvalidMessage` again — consuming nothing, emitting no visitor
+callback. No continuation of bytes can make malformed input valid, so a caller
+that logs the exception and keeps reading its socket can neither resume decoding
+nor ever see `Complete` for a stream this decoder already rejected; decode the
+next message with a new `IStream`. (`Invalid` is thus reported by `Status`, never
+returned by `Feed`, which throws instead.) A `SofabException` carrying
+`InvalidMessage` that a *visitor* raises — generated code judging a schema bound
+(MESSAGE_SPEC §7.1) or a strict-UTF-8 payload (§6.4) — is the same terminal
+outcome and latches the same way.
+
 Generated decode code may also enforce receiver-side limits on unbounded
 (schema declares no `count` / `maxlen`) fields — `max_dyn_array_count`,
 `max_dyn_string_len`, `max_dyn_blob_len` caps baked in by `sofabgen`. A field
@@ -228,7 +241,11 @@ truncated. This is a category deliberately **distinct** from
 wire malformation, so two peers with different caps do not read as a conformance
 divergence. This corelib enforces no limits and ships no default cap values — it
 only defines the `LimitExceeded` category so generated code reports a violation
-uniformly.
+uniformly. A limit rejection is terminal as well (§6.2.1), so it too closes the
+`IStream` to further feeds; but because those bytes are *well-formed*, §6.3
+forbids folding it into the `INVALID` decode outcome, and `Status` never reports
+`Invalid` for it — it stays `Incomplete`, which is what happened: the decoder
+stopped part-way through a message and will not finish it.
 
 ### Code generator
 
