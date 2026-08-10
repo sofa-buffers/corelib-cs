@@ -24,9 +24,11 @@ namespace sofab;
 /// </para>
 /// <para>
 /// <see cref="Invalid"/> input — malformed regardless of what follows — is never
-/// returned; it throws <see cref="SofabException"/> with
-/// <see cref="SofabError.InvalidMessage"/> from <c>Feed</c>. The value is defined
-/// here so the enum names all three §7 outcomes.
+/// <em>returned</em>: <c>Feed</c> throws <see cref="SofabException"/> with
+/// <see cref="SofabError.InvalidMessage"/> instead. That verdict is terminal, so
+/// the decoder latches it — <see cref="IStream.Status"/> answers
+/// <see cref="Invalid"/> from then on, and every later <c>Feed</c> throws again
+/// rather than resuming a stream already known to be malformed.
 /// </para>
 /// <para>
 /// This mirrors the Go port's <c>ErrIncomplete</c> sentinel and the TypeScript
@@ -49,8 +51,9 @@ public enum DecodeStatus
     /// <summary>
     /// The bytes are malformed regardless of what follows. Never returned by
     /// <c>Feed</c>: it throws <see cref="SofabException"/>
-    /// (<see cref="SofabError.InvalidMessage"/>) instead. Present for parity with
-    /// the three MESSAGE_SPEC §7 outcomes.
+    /// (<see cref="SofabError.InvalidMessage"/>) instead — but the verdict is
+    /// terminal, so <see cref="IStream.Status"/> reports this value for every
+    /// query after that throw.
     /// </summary>
     Invalid,
 }

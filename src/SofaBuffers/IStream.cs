@@ -35,6 +35,16 @@ namespace sofab;
 /// There is no finish / finalize step.
 /// </para>
 /// <para>
+/// <b>A rejection is terminal.</b> Malformed bytes are malformed regardless of
+/// what follows, so once a <c>Feed</c> has thrown
+/// <see cref="SofabError.InvalidMessage"/> the decoder latches that verdict:
+/// <see cref="Status"/> reports <see cref="DecodeStatus.Invalid"/> and every
+/// later <c>Feed</c> throws again, consuming nothing and emitting no visitor
+/// callback — a caller that logs the error and keeps reading its socket cannot
+/// resume a stream this decoder has already rejected. Decode a new message with
+/// a new <see cref="IStream"/>.
+/// </para>
+/// <para>
 /// Unlike the C decoder there is no per-field "bind a destination" step and no
 /// explicit skip bookkeeping: an <see cref="IVisitor"/> simply ignores fields it
 /// does not care about. Scalars and floats are delivered whole; string / blob
@@ -71,6 +81,16 @@ namespace sofab;
 /// </example>
 public sealed class IStream
 {
+    /// <summary>
+    /// Where the byte-at-a-time machine stands — plus, as its last two members,
+    /// the two ways this decoder can be permanently done with a stream.
+    /// </summary>
+    /// <remarks>
+    /// The terminal verdicts live in the state field rather than in a flag of
+    /// their own: a dead decoder <em>has</em> no parse position, one field is one
+    /// load on the entry check, and the decoder object does not grow. They are
+    /// ordered last so that single comparison is <c>&gt;= Rejected</c>.
+    /// </remarks>
     private enum State
     {
         Idle,
@@ -80,6 +100,21 @@ public sealed class IStream
         FixlenVal,
         FixlenRaw,
         ArrayCount,
+
+        /// <summary>
+        /// The bytes seen were malformed: the <c>INVALID</c> outcome (§5.2),
+        /// which is terminal — no continuation can make them valid.
+        /// </summary>
+        Rejected,
+
+        /// <summary>
+        /// A receiver-side limit was exceeded (§6.2.1). Also terminal, but
+        /// <b>not</b> <c>INVALID</c>: the bytes are well-formed and §6.3 forbids
+        /// folding a policy rejection into the wire-conformance outcome, so this
+        /// state closes the stream without ever making <see cref="Status"/> say
+        /// <see cref="DecodeStatus.Invalid"/>.
+        /// </summary>
+        LimitStopped,
     }
 
     // incremental varint accumulator
@@ -154,7 +189,9 @@ public sealed class IStream
     /// not an error — feed more bytes to continue.
     /// </returns>
     /// <exception cref="SofabException">
-    /// with <see cref="SofabError.InvalidMessage"/> on malformed input
+    /// with <see cref="SofabError.InvalidMessage"/> on malformed input — and on
+    /// every later call once this decoder has rejected a stream, since that
+    /// verdict is terminal (§5.2)
     /// </exception>
     public DecodeStatus Feed(byte[] data, IVisitor visitor)
     {
@@ -181,7 +218,9 @@ public sealed class IStream
     /// afterwards via <see cref="Status"/>.
     /// </returns>
     /// <exception cref="SofabException">
-    /// with <see cref="SofabError.InvalidMessage"/> on malformed input
+    /// with <see cref="SofabError.InvalidMessage"/> on malformed input — including
+    /// on every later call, once this decoder has rejected a stream (§5.2: the
+    /// <c>INVALID</c> verdict is terminal)
     /// </exception>
     /// <exception cref="ArgumentNullException"><paramref name="data"/> is <c>null</c></exception>
     /// <exception cref="ArgumentOutOfRangeException">
@@ -189,6 +228,15 @@ public sealed class IStream
     /// </exception>
     public DecodeStatus Feed(byte[] data, int off, int len, IVisitor visitor)
     {
+        // A terminal verdict is terminal: no continuation of bytes can make input
+        // this decoder already rejected valid, so refuse the chunk before looking
+        // at it -- nothing is consumed and no visitor callback is emitted (§5.2).
+        // The two dead states sort last, so one comparison covers both.
+        if (_state >= State.Rejected)
+        {
+            ThrowLatched(_state);
+        }
+
         // Validate the slice once, here, rather than paying an array bounds check
         // on every byte of the hot decode loops: everything below reads strictly
         // inside [off, off+len), which this establishes is inside `data`.
@@ -203,57 +251,79 @@ public sealed class IStream
 
         int i = off;
         int endExclusive = off + len;
-        while (i < endExclusive)
+        // The decode loop runs inside a catch so that a terminal verdict is
+        // latched wherever it is raised -- by any of the throw sites below, or by
+        // a visitor judging a field against its schema (MESSAGE_SPEC §7.1) or a
+        // receiver-side cap (§6.2.1) -- without every one of them having to
+        // remember to record it. The handler is entered only on the error path;
+        // the loop itself is untouched, which the Callgrind decode rows confirm.
+        try
         {
-            // Fast path: stream string/blob payloads in bulk rather than one
-            // callback per byte.
-            if (_state == State.FixlenRaw)
+            while (i < endExclusive)
             {
-                int take = Math.Min(endExclusive - i, _fixlenRemaining);
-                int chunkOffset = _fixlenTotal - _fixlenRemaining;
-                if (_fixlenType == FixlenType.String)
+                // Fast path: stream string/blob payloads in bulk rather than one
+                // callback per byte.
+                if (_state == State.FixlenRaw)
                 {
-                    visitor.String(_id, _fixlenTotal, chunkOffset, data, i, take);
-                }
-                else if (_fixlenType == FixlenType.Blob)
-                {
-                    visitor.Blob(_id, _fixlenTotal, chunkOffset, data, i, take);
-                }
-                else
-                {
-                    throw new SofabException(SofabError.InvalidMessage, "raw fixlen type");
-                }
-                _fixlenRemaining -= take;
-                i += take;
-                if (_fixlenRemaining == 0)
-                {
-                    _state = State.Idle;
-                }
-                continue;
-            }
-
-            // Fast path: at a clean field boundary (no partial varint or
-            // mid-array element carried over from a previous Feed) advance an
-            // index straight over the contiguous buffer, decoding whole fields
-            // -- and whole arrays -- inline. This skips the per-byte state-
-            // machine dispatch that dominates decode cost. We only fall back to
-            // the byte-at-a-time machine for the tail of a field that is split
-            // across a Feed boundary.
-            if (_state == State.Idle && _varintShift == 0 && !_inArray)
-            {
-                int consumed = FastField(data, i, endExclusive, visitor);
-                if (consumed > 0)
-                {
-                    i += consumed;
+                    int take = Math.Min(endExclusive - i, _fixlenRemaining);
+                    int chunkOffset = _fixlenTotal - _fixlenRemaining;
+                    if (_fixlenType == FixlenType.String)
+                    {
+                        visitor.String(_id, _fixlenTotal, chunkOffset, data, i, take);
+                    }
+                    else if (_fixlenType == FixlenType.Blob)
+                    {
+                        visitor.Blob(_id, _fixlenTotal, chunkOffset, data, i, take);
+                    }
+                    else
+                    {
+                        throw new SofabException(SofabError.InvalidMessage, "raw fixlen type");
+                    }
+                    _fixlenRemaining -= take;
+                    i += take;
+                    if (_fixlenRemaining == 0)
+                    {
+                        _state = State.Idle;
+                    }
                     continue;
                 }
-                // consumed == 0: the field is not fully present in this chunk.
-                // Fall through to the byte machine, which accumulates the
-                // partial header/value and resumes on the next Feed.
-            }
 
-            Step(data[i] & 0xFF, visitor);
-            i++;
+                // Fast path: at a clean field boundary (no partial varint or
+                // mid-array element carried over from a previous Feed) advance an
+                // index straight over the contiguous buffer, decoding whole fields
+                // -- and whole arrays -- inline. This skips the per-byte state-
+                // machine dispatch that dominates decode cost. We only fall back to
+                // the byte-at-a-time machine for the tail of a field that is split
+                // across a Feed boundary.
+                if (_state == State.Idle && _varintShift == 0 && !_inArray)
+                {
+                    int consumed = FastField(data, i, endExclusive, visitor);
+                    if (consumed > 0)
+                    {
+                        i += consumed;
+                        continue;
+                    }
+                    // consumed == 0: the field is not fully present in this chunk.
+                    // Fall through to the byte machine, which accumulates the
+                    // partial header/value and resumes on the next Feed.
+                }
+
+                Step(data[i] & 0xFF, visitor);
+                i++;
+            }
+        }
+        catch (SofabException e) when (
+            e.Error == SofabError.InvalidMessage || e.Error == SofabError.LimitExceeded)
+        {
+            // Latch the first terminal verdict: INVALID (§5.2) is malformed
+            // "regardless of what follows", and a receiver-side limit (§6.2.1) is
+            // just as terminal, so this decoder is done with the stream either
+            // way. Whatever parse position it held is meaningless now, so the
+            // verdict simply replaces it.
+            _state = e.Error == SofabError.InvalidMessage
+                ? State.Rejected
+                : State.LimitStopped;
+            throw;
         }
         return Status;
     }
@@ -263,23 +333,43 @@ public sealed class IStream
     /// accessor that never throws and never mutates state.
     /// </summary>
     /// <value>
-    /// <see cref="DecodeStatus.Complete"/> when the decoder rests at a clean field
-    /// boundary — nothing buffered, no open sequence — so the bytes seen form a
-    /// valid message; otherwise <see cref="DecodeStatus.Incomplete"/>, because a
-    /// field is only partially consumed (a partial header/value varint, an
-    /// unfinished fixlen / array payload) or a nested sequence is still open.
+    /// <see cref="DecodeStatus.Invalid"/> once a <c>Feed</c> has rejected the
+    /// stream as malformed — that verdict is terminal and outranks both other
+    /// outcomes (§5.2). Otherwise <see cref="DecodeStatus.Complete"/> when the
+    /// decoder rests at a clean field boundary — nothing buffered, no open
+    /// sequence — so the bytes seen form a valid message; or
+    /// <see cref="DecodeStatus.Incomplete"/>, because a field is only partially
+    /// consumed (a partial header/value varint, an unfinished fixlen / array
+    /// payload) or a nested sequence is still open.
     /// </value>
     /// <remarks>
     /// This is the same value the last <see cref="Feed(byte[], IVisitor)"/>
     /// returned; it lets a caller that fed byte-at-a-time query the outcome
     /// without another <c>Feed</c>. Per the finish-less spec there is no finalize
     /// step: a trailing <see cref="DecodeStatus.Incomplete"/> is a truncation the
-    /// caller interprets, not an error the decoder raises. A malformed message has
-    /// already thrown <see cref="SofabException"/> from <c>Feed</c>, so
-    /// <see cref="DecodeStatus.Invalid"/> is never observed here.
+    /// caller interprets, not an error the decoder raises.
+    /// <para>
+    /// A malformed message is reported by <c>Feed</c> as a thrown
+    /// <see cref="SofabException"/> (<see cref="SofabError.InvalidMessage"/>) — but
+    /// the verdict is latched, so this property answers
+    /// <see cref="DecodeStatus.Invalid"/> from then on and never again claims the
+    /// stream is <see cref="DecodeStatus.Complete"/> or merely
+    /// <see cref="DecodeStatus.Incomplete"/>. A caller that catches the exception
+    /// and keeps feeding gets the same exception from every later <c>Feed</c>.
+    /// </para>
+    /// <para>
+    /// A receiver-side limit (<see cref="SofabError.LimitExceeded"/>, §6.2.1) is
+    /// terminal too — the stream is closed to further feeds — but it is
+    /// deliberately <em>not</em> reported as <see cref="DecodeStatus.Invalid"/>:
+    /// those bytes are well-formed, and §6.3 forbids folding a receiver's policy
+    /// rejection into the wire-conformance outcome. Such a decoder reports
+    /// <see cref="DecodeStatus.Incomplete"/>, which is what happened — it stopped
+    /// part-way through a message and will not finish it.
+    /// </para>
     /// </remarks>
     public DecodeStatus Status =>
-        AtBoundary ? DecodeStatus.Complete : DecodeStatus.Incomplete;
+        _state == State.Rejected ? DecodeStatus.Invalid
+            : AtBoundary ? DecodeStatus.Complete : DecodeStatus.Incomplete;
 
     /// <summary>
     /// Whether the decoder rests at a clean top-level field boundary: idle state,
@@ -291,7 +381,9 @@ public sealed class IStream
     /// partially accumulated while otherwise idle; a non-zero <see cref="_depth"/>
     /// means a <c>SEQUENCE_START</c> has no matching <c>SEQUENCE_END</c> yet. Any
     /// of these is INCOMPLETE (§7). Mid-array parsing already implies a non-idle
-    /// state, so <see cref="_inArray"/> needs no separate check.
+    /// state, so <see cref="_inArray"/> needs no separate check. The two terminal
+    /// states are not a parse position at all and are answered by
+    /// <see cref="Status"/> before it consults this.
     /// </remarks>
     private bool AtBoundary =>
         _state == State.Idle && _varintShift == 0 && _depth == 0;
@@ -908,6 +1000,16 @@ public sealed class IStream
     [MethodImpl(MethodImplOptions.NoInlining)]
     private static void ThrowVarintOverflow() =>
         throw new SofabException(SofabError.InvalidMessage, "varint overflow");
+
+    /// <summary>
+    /// Re-raise a terminal verdict this decoder already reached, for a caller that
+    /// caught the first one and fed on anyway (§5.2).
+    /// </summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static void ThrowLatched(State state) =>
+        throw new SofabException(
+            state == State.Rejected ? SofabError.InvalidMessage : SofabError.LimitExceeded,
+            "stream already rejected");
 
     /// <summary>
     /// Per-byte decode for the buffer tail, where fewer than
