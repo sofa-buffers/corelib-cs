@@ -292,6 +292,18 @@ of the bytes stays with the caller.
   call's* offset (reserved header room and all) instead of at 0. The offset is
   consumed by the flush it was installed in: a later flush the sink returns from
   without installing anything resumes at 0 again (CORELIB_PLAN §5.1).
+- **`Sofab.MinOutputBuffer` = 1 (`MIN_OUTPUT_BUFFER`, CORELIB_PLAN §5.1).** The
+  smallest buffer accepted **for streaming**. This encoder splits every atomic unit
+  across a flush, so one byte is enough: any message streams through a one-byte
+  buffer and produces bytes identical to the one-shot path. The minimum applies
+  **only to a buffer installed with a `FlushSink`** — at construction and at every
+  `BufferSet` — where `buffer.Length - offset >= Sofab.MinOutputBuffer` must hold;
+  a buffer that falls short is rejected right there with an
+  `ArgumentOutOfRangeException`, the same way an out-of-range offset is, never
+  partway through a message. A buffer installed **without** a sink is subject to no
+  minimum at all: no flush can occur, so a message sized from a bounded schema's
+  `MaxSize` fits exactly — a two-byte message encodes into a two-byte buffer — and
+  anything larger reports `SofabError.BufferFull`.
 - **Decode (`IStream` + `IVisitor`).** The `byte[]` you `Feed` is aliased, not
   copied: `String` / `Blob` chunks point directly into it (`data[chunkOffset ..
   chunkOffset+chunkLength)`) and are valid only for the duration of the callback.

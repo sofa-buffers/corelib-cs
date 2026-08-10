@@ -465,7 +465,12 @@ public class TestVectorsConformanceTests
         // flush path (PushByte / PushRaw spilling to the FlushSink mid-field)
         // is exercised at every boundary. The streamed-out bytes must still
         // reassemble to exactly serialized.hex.
-        foreach (int chunk in new[] { 1, 3, 7 })
+        //
+        // The first size is the port's own declared MIN_OUTPUT_BUFFER, which is
+        // what CORELIB_PLAN §7.2 item 4 requires this test to run at: it is the
+        // size that proves the constant is real. The larger ones land the flush
+        // boundary at other offsets within a field.
+        foreach (int chunk in new[] { Sofab.MinOutputBuffer, 3, 7 })
         {
             var produced = new MemoryStream();
             var os = new OStream(new byte[chunk], 0, (d, o, l) => produced.Write(d, o, l));

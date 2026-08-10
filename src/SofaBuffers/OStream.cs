@@ -147,7 +147,7 @@ public sealed class OStream
     /// Create an encoder over <paramref name="buffer"/> with no flush sink.
     /// Writing past the end of the buffer raises <see cref="SofabError.BufferFull"/>.
     /// </summary>
-    /// <param name="buffer">caller-owned output buffer (length &gt; 0)</param>
+    /// <param name="buffer">caller-owned output buffer (any length, incl. 0)</param>
     public OStream(byte[] buffer)
         : this(buffer, 0, null)
     {
@@ -169,19 +169,19 @@ public sealed class OStream
     /// fills, the accumulated bytes are passed to <paramref name="sink"/> and
     /// writing resumes at the start of the buffer.
     /// </summary>
-    /// <param name="buffer">caller-owned output buffer (length &gt; 0)</param>
+    /// <remarks>
+    /// With a sink the buffer is a <i>streaming</i> buffer and must satisfy
+    /// <c>buffer.Length - offset &gt;= <see cref="Sofab.MinOutputBuffer"/></c>;
+    /// it is rejected here, where it is handed over, rather than partway through
+    /// a message. Without a sink no flush can occur and no minimum applies
+    /// (CORELIB_PLAN §5.1).
+    /// </remarks>
+    /// <param name="buffer">caller-owned output buffer</param>
     /// <param name="offset">initial write position (<c>0..buffer.Length</c>)</param>
     /// <param name="sink">flush sink, or <c>null</c> for none</param>
     public OStream(byte[] buffer, int offset, FlushSink? sink)
     {
-        if (buffer == null || buffer.Length == 0)
-        {
-            throw new ArgumentException("buffer must be non-empty", nameof(buffer));
-        }
-        if (offset < 0 || offset > buffer.Length)
-        {
-            throw new ArgumentOutOfRangeException(nameof(offset), "offset out of range");
-        }
+        CheckBuffer(buffer, offset, sink != null);
         _buffer = buffer;
         _end = buffer.Length;
         _offset = offset;
@@ -217,22 +217,51 @@ public sealed class OStream
     /// without installing anything resumes at 0. Handing the <i>same</i> buffer
     /// back is an installation like any other, which is how a sink re-arms its
     /// framing-header reservation for every flushed packet.
+    /// <para>
+    /// An encoder that has a sink installed is streaming, so the replacement is
+    /// held to <see cref="Sofab.MinOutputBuffer"/> exactly as the constructor's
+    /// buffer was — <c>buffer.Length - offset</c> must reach it, and a buffer
+    /// that does not is rejected here rather than partway through the message.
+    /// On a sinkless encoder no minimum applies (CORELIB_PLAN §5.1).
+    /// </para>
     /// </remarks>
-    /// <param name="buffer">new caller-owned output buffer (length &gt; 0)</param>
+    /// <param name="buffer">new caller-owned output buffer</param>
     /// <param name="offset">initial write position (<c>0..buffer.Length</c>)</param>
     public void BufferSet(byte[] buffer, int offset)
     {
-        if (buffer == null || buffer.Length == 0)
+        CheckBuffer(buffer, offset, _sink != null);
+        _buffer = buffer;
+        _end = buffer.Length;
+        _offset = offset;
+    }
+
+    /// <summary>
+    /// Validate a buffer at the point it is handed over: non-null, an in-range
+    /// start offset, and — for a buffer installed <b>with</b> a flush sink — at
+    /// least <see cref="Sofab.MinOutputBuffer"/> writable bytes beyond that
+    /// offset. A sinkless buffer has no minimum: no flush can occur, so a
+    /// message that fits is encoded and one that does not reports
+    /// <see cref="SofabError.BufferFull"/> (CORELIB_PLAN §5.1).
+    /// </summary>
+    /// <param name="buffer">the buffer being installed</param>
+    /// <param name="offset">its start offset</param>
+    /// <param name="streaming">whether a flush sink is attached</param>
+    private static void CheckBuffer(byte[] buffer, int offset, bool streaming)
+    {
+        if (buffer == null)
         {
-            throw new ArgumentException("buffer must be non-empty", nameof(buffer));
+            throw new ArgumentException("buffer must not be null", nameof(buffer));
         }
         if (offset < 0 || offset > buffer.Length)
         {
             throw new ArgumentOutOfRangeException(nameof(offset), "offset out of range");
         }
-        _buffer = buffer;
-        _end = buffer.Length;
-        _offset = offset;
+        if (streaming && buffer.Length - offset < Sofab.MinOutputBuffer)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(buffer),
+                $"a streaming buffer needs at least {Sofab.MinOutputBuffer} byte(s) past its offset");
+        }
     }
 
     // --- primitives ---------------------------------------------------------
