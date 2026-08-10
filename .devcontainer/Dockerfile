@@ -5,12 +5,16 @@ ENV DOTNET_CLI_TELEMETRY_OPTOUT=1
 ENV DOTNET_NOLOGO=1
 ENV PATH=/root/.dotnet/tools:$PATH
 
-# Base utilities
+# Base utilities. `valgrind` is toolchain, not a convenience: bench/run_callgrind.sh
+# shells out to `valgrind --tool=callgrind` for the instruction counts (Ir/op) —
+# the one benchmark number that is independent of the host machine — and the
+# script refuses to start without it.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     curl \
     gnupg \
     git \
+    valgrind \
     && rm -rf /var/lib/apt/lists/*
 
 # .NET 9 runtime alongside the image's .NET 10 SDK. The library and test project
