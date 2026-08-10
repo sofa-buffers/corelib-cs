@@ -30,7 +30,8 @@ format is byte-for-byte compatible with the other SofaBuffers language ports.
 `net10.0`, and `dotnet restore` resolves *all* of a solution's target frameworks
 regardless of which one you then build, so the newest SDK is the minimum for
 building or testing either leg; the .NET 9 runtime has to be installed as well to
-run the `net9.0` leg (which is why CI installs both). Consuming the published
+run the `net9.0` leg (which is why every workflow that restores — CI *and* the
+docs build — installs both). Consuming the published
 package needs only .NET 9 or later.
 
 ### Dependencies
