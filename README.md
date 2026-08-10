@@ -26,7 +26,12 @@ format is byte-for-byte compatible with the other SofaBuffers language ports.
 
 ### Requirements
 
-.NET SDK 9.0 or later; the library targets `net9.0`.
+.NET SDK 10.0. Every project in the solution multi-targets `net9.0` and
+`net10.0`, and `dotnet restore` resolves *all* of a solution's target frameworks
+regardless of which one you then build, so the newest SDK is the minimum for
+building or testing either leg; the .NET 9 runtime has to be installed as well to
+run the `net9.0` leg (which is why CI installs both). Consuming the published
+package needs only .NET 9 or later.
 
 ### Dependencies
 
@@ -450,8 +455,11 @@ dotnet test  SofaBuffers.sln                # run the xUnit suite
 ./coverage.sh                               # coverlet: Cobertura + terminal summary
 ```
 
-Requires the .NET SDK 9. The `.devcontainer/` builds a ready-to-use image with the
-SDK and tooling preinstalled. Tests live in `tests/SofaBuffers.Tests/`, including
+Requires the .NET SDK 10 and the .NET 9 runtime (see [Requirements](#requirements)).
+All three commands cover both target frameworks; append `-f net9.0` / `-f net10.0`
+to `build` or `test` to narrow a run to one of them, which is what the CI matrix
+does. The `.devcontainer/` builds a ready-to-use image with the SDKs and tooling
+preinstalled. Tests live in `tests/SofaBuffers.Tests/`, including
 conformance replay of the shared language-agnostic vectors (byte-exact encode,
 field-match decode, byte-at-a-time chunked decode). Helpers used by more than one
 test file live in `tests/SofaBuffers.Tests/Common/` — `RecordingVisitor` plus
@@ -460,25 +468,30 @@ test file live in `tests/SofaBuffers.Tests/Common/` — `RecordingVisitor` plus
 
 ## Benchmarks
 
-Two standalone tools mirror the other ports' benchmarks so implementations can be
-compared directly:
+Three standalone tools mirror the other ports' benchmarks so implementations can
+be compared directly: `perf` measures the per-op cost, `bench` measures this
+machine's throughput in MB/s, and `bench/run_callgrind.sh` measures the
+deterministic instruction count per operation (Ir/op). The first two are one
+project, `bench/SofaBuffers.Bench`, selected by argument; because that project
+multi-targets, each command line has to name the framework to run:
 
 ```bash
 # perf -- per-op cost: a CPU-speed-independent figure plus throughput MB/s.
-dotnet run -c Release --project bench/SofaBuffers.Bench -- perf
+dotnet run -c Release --project bench/SofaBuffers.Bench -f net10.0 -- perf
 
 # bench -- a throughput table in MB/s for encode/decode workloads. MB = 1e6 bytes.
-dotnet run -c Release --project bench/SofaBuffers.Bench -- bench
+dotnet run -c Release --project bench/SofaBuffers.Bench -f net10.0 -- bench
 ```
 
 The managed runtime exposes no portable cycle counter, so `perf` reports CPU
-time/op (clock-independent) as the code-cost proxy alongside MB/s. For a fully
-CPU-speed-independent number, `bench/run_callgrind.sh` reports instructions
-retired per operation (Ir/op) under Callgrind:
+time/op (clock-independent) as the code-cost proxy alongside MB/s. Only the third
+tool is fully independent of the machine: `bench/run_callgrind.sh` counts
+instructions retired per operation under Callgrind (it needs `valgrind`, builds
+the project itself, and runs it directly on the built assembly):
 
 ```bash
 bash bench/run_callgrind.sh
-# workloads: encode_u64_array, decode_u64_array, encode_typical, decode_typical
+# workloads: encode_u64_array, encode_typical, decode_u64_array, decode_typical
 ```
 
 Because the .NET runtime JITs the hot code at run time there is no stable native

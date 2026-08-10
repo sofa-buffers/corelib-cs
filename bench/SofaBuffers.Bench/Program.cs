@@ -5,13 +5,13 @@
  *   perf  -- per-op cost: cycles/op (CPU-speed independent) + throughput MB/s
  *   bench -- throughput table in MB/s for encode/decode workloads
  *
- * Run with:
- *   dotnet run -c Release --project bench/SofaBuffers.Bench -- perf
- *   dotnet run -c Release --project bench/SofaBuffers.Bench -- bench
+ * Run with (the project multi-targets, so `dotnet run` needs a framework):
+ *   dotnet run -c Release --project bench/SofaBuffers.Bench -f net10.0 -- perf
+ *   dotnet run -c Release --project bench/SofaBuffers.Bench -f net10.0 -- bench
  *
  * A single-shot Callgrind workload (CPU-speed-independent instruction counting,
  * ARCHITECTURE.md §10.1) is selected by naming the workload directly:
- *   dotnet run -c Release --project bench/SofaBuffers.Bench -- encode_u64_array
+ *   dotnet run -c Release --project bench/SofaBuffers.Bench -f net10.0 -- encode_u64_array
  *
  * SPDX-License-Identifier: MIT
  */
