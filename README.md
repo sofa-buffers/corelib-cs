@@ -383,7 +383,10 @@ dotnet test  SofaBuffers.sln                # run the xUnit suite
 Requires the .NET SDK 9. The `.devcontainer/` builds a ready-to-use image with the
 SDK and tooling preinstalled. Tests live in `tests/SofaBuffers.Tests/`, including
 conformance replay of the shared language-agnostic vectors (byte-exact encode,
-field-match decode, byte-at-a-time chunked decode).
+field-match decode, byte-at-a-time chunked decode). Helpers used by more than one
+test file live in `tests/SofaBuffers.Tests/Common/` — `RecordingVisitor` plus
+`TestBytes.Bytes`/`Encode`; import the latter with
+`using static SofaBuffers.Tests.Common.TestBytes;` rather than re-declaring them.
 
 ## Benchmarks
 

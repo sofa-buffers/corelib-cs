@@ -9,21 +9,12 @@ using System.Collections.Generic;
 using System.Globalization;
 using Xunit;
 using SofaBuffers.Tests.Common;
+using static SofaBuffers.Tests.Common.TestBytes;
 
 namespace SofaBuffers.Tests;
 
 public class IStreamTests
 {
-    private static byte[] Bytes(params int[] values)
-    {
-        var outp = new byte[values.Length];
-        for (int i = 0; i < values.Length; i++)
-        {
-            outp[i] = (byte)values[i];
-        }
-        return outp;
-    }
-
     private static List<string> Decode(byte[] data)
     {
         var v = new RecordingVisitor();

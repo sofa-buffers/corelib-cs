@@ -9,32 +9,12 @@
 
 using System;
 using Xunit;
+using static SofaBuffers.Tests.Common.TestBytes;
 
 namespace SofaBuffers.Tests;
 
 public class OStreamTests
 {
-    /// <summary>Encode via <paramref name="body"/> into a fresh buffer and return exactly the used bytes.</summary>
-    private static byte[] Encode(Action<OStream> body)
-    {
-        var buf = new byte[256];
-        var os = new OStream(buf);
-        body(os);
-        var outp = new byte[os.BytesUsed];
-        Array.Copy(buf, outp, os.BytesUsed);
-        return outp;
-    }
-
-    private static byte[] Bytes(params int[] values)
-    {
-        var outp = new byte[values.Length];
-        for (int i = 0; i < values.Length; i++)
-        {
-            outp[i] = (byte)values[i];
-        }
-        return outp;
-    }
-
     [Fact]
     public void UnsignedIdMin()
     {
@@ -417,17 +397,10 @@ public class OStreamTests
     {
         const int MaxDepth = 255;
 
-        static byte[] EncodeBig(Action<OStream> body)
-        {
-            var buf = new byte[4096];
-            var os = new OStream(buf);
-            body(os);
-            var outp = new byte[os.BytesUsed];
-            Array.Copy(buf, outp, os.BytesUsed);
-            return outp;
-        }
+        // 255 sequence headers plus a leaf outgrow the shared default buffer.
+        const int Big = 4096;
 
-        Assert.Equal(Array.Empty<byte>(), EncodeBig(os =>
+        Assert.Equal(Array.Empty<byte>(), Encode(Big, os =>
         {
             for (int i = 0; i < MaxDepth; i++)
             {
@@ -439,7 +412,7 @@ public class OStreamTests
             }
         }));
 
-        byte[] wire = EncodeBig(os =>
+        byte[] wire = Encode(Big, os =>
         {
             for (int i = 0; i < MaxDepth; i++)
             {

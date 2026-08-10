@@ -32,21 +32,12 @@ using System;
 using System.Collections.Generic;
 using Xunit;
 using SofaBuffers.Tests.Common;
+using static SofaBuffers.Tests.Common.TestBytes;
 
 namespace SofaBuffers.Tests;
 
 public class FixlenArrayHeaderOrderTests
 {
-    private static byte[] Bytes(params int[] values)
-    {
-        var outp = new byte[values.Length];
-        for (int i = 0; i < values.Length; i++)
-        {
-            outp[i] = (byte)values[i];
-        }
-        return outp;
-    }
-
     /// <summary>Concatenate <paramref name="prefix"/>, <paramref name="zeros"/> NUL payload bytes, and <paramref name="suffix"/>.</summary>
     private static byte[] Vector(byte[] prefix, int zeros, byte[] suffix)
     {

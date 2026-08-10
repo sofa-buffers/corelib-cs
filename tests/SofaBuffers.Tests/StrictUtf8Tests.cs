@@ -27,6 +27,7 @@ using System.Linq;
 using System.Text;
 using System.Text.Json;
 using Xunit;
+using static SofaBuffers.Tests.Common.TestBytes;
 
 namespace SofaBuffers.Tests;
 
@@ -47,16 +48,6 @@ public class StrictUtf8Tests
             yield return b;
         }
         while (value != 0);
-    }
-
-    private static byte[] Encode(Action<OStream> body)
-    {
-        var buf = new byte[256];
-        var os = new OStream(buf);
-        body(os);
-        var outp = new byte[os.BytesUsed];
-        Array.Copy(buf, outp, os.BytesUsed);
-        return outp;
     }
 
     // --- unit tests: encode side -------------------------------------------

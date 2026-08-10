@@ -28,21 +28,12 @@
 using System;
 using System.Collections.Generic;
 using Xunit;
+using static SofaBuffers.Tests.Common.TestBytes;
 
 namespace SofaBuffers.Tests;
 
 public class FixlenHeaderOrderTests
 {
-    private static byte[] Bytes(params int[] values)
-    {
-        var outp = new byte[values.Length];
-        for (int i = 0; i < values.Length; i++)
-        {
-            outp[i] = (byte)values[i];
-        }
-        return outp;
-    }
-
     /// <summary>A fixlen field at id 3: header `1a`, then the given length word.</summary>
     private static byte[] Field(int word, int payloadBytes) =>
         Concat(Bytes(0x1A, word), new byte[payloadBytes]);
