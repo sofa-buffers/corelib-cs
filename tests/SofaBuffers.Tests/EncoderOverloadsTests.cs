@@ -253,9 +253,13 @@ public class EncoderOverloadsTests
     [Fact]
     public void ConstructorValidatesArguments()
     {
-        Assert.Throws<ArgumentException>(() => new OStream(Array.Empty<byte>()));
         Assert.Throws<ArgumentOutOfRangeException>(() => new OStream(new byte[8], 9));
         Assert.Throws<ArgumentException>(() => new OStream(null!));
+
+        // A buffer installed without a sink is subject to no minimum
+        // (CORELIB_PLAN §5.1); only a sink-installed one is held to
+        // Sofab.MinOutputBuffer. Both directions live in MinOutputBufferTests.
+        _ = new OStream(Array.Empty<byte>());
     }
 
     [Fact]
@@ -272,8 +276,11 @@ public class EncoderOverloadsTests
         new IStream().Feed(fresh, 2, os.BytesUsed - 2, new BufferSetSink(got));
         Assert.Equal(new ulong[] { 42UL }, got);
 
-        Assert.Throws<ArgumentException>(() => os.BufferSet(Array.Empty<byte>(), 0));
         Assert.Throws<ArgumentOutOfRangeException>(() => os.BufferSet(new byte[4], 99));
+        Assert.Throws<ArgumentException>(() => os.BufferSet(null!, 0));
+
+        // No sink on this encoder, so the installed buffer has no minimum.
+        os.BufferSet(Array.Empty<byte>(), 0);
     }
 
     private sealed class BufferSetSink : IVisitor
