@@ -484,6 +484,17 @@ dotnet run -c Release --project bench/SofaBuffers.Bench -f net10.0 -- perf
 dotnet run -c Release --project bench/SofaBuffers.Bench -f net10.0 -- bench
 ```
 
+The workload set is the family's, defined once in
+`bench/SofaBuffers.Bench/Workloads.cs` and driven by all three tools: a
+1000-element `u64` array, a small mixed `typical` message, an unbounded **1 MB
+`blob`** encoded both one-shot and streamed through a 4096-byte buffer with a
+flush sink (and decoded from 4096-byte chunks), and a **`composite`** message
+holding what the flat datasets never reach — a wrapper array with a header per
+element, 320 bytes of non-ASCII UTF-8, nesting at depth 3, a field equal to its
+default that the encoder must *not* write, and a two-byte field header. The
+encoded sizes are cross-port parity checks: 170 bytes for the `perf` message,
+1,000,005 for the blob and 956 for the composite.
+
 The managed runtime exposes no portable cycle counter, so `perf` reports CPU
 time/op (clock-independent) as the code-cost proxy alongside MB/s. Only the third
 tool is fully independent of the machine: `bench/run_callgrind.sh` counts
@@ -493,11 +504,56 @@ builds the project itself, and runs it directly on the built assembly):
 
 ```bash
 bash bench/run_callgrind.sh
-# workloads: encode_u64_array, encode_typical, decode_u64_array, decode_typical
+# one row: WORKLOADS=encode_composite bash bench/run_callgrind.sh
+# workloads: encode_u64_array, encode_typical, encode_blob_oneshot, encode_blob_streaming, encode_composite, decode_u64_array, decode_typical, decode_blob, decode_composite, decode_composite_skip
 ```
 
 Because the .NET runtime JITs the hot code at run time there is no stable native
 symbol to `--toggle-collect` on, so the script runs each workload at two rep
 counts and subtracts the whole-process instruction counts
 (`Ir/op = (Ir(R2) − Ir(R1)) / (R2 − R1)`), which cancels CLR startup, JIT and
-one-time setup exactly and leaves the pure per-op cost.
+one-time setup exactly and leaves the pure per-op cost. It pins the runtime
+(`DOTNET_TieredCompilation=0`, a gen0 large enough that the bounded run never
+collects, a heap-limit cap so the GC initializes under Valgrind) so the two runs
+differ only in the rep count.
+
+One measurement, on one shared container (`net10.0`, .NET 10.0.302) — the MB/s
+column is this machine, the Ir/op column is not:
+
+| workload | Ir/op | MB/s |
+|---|---:|---:|
+| encode: u64 array (1000)   |    64,417 |   2,169.28 |
+| encode: typical message    |     1,591 |     133.57 |
+| encode: blob 1MB one-shot  | 1,008,631 |  35,615.69 |
+| encode: blob 1MB streaming |   155,458 |  42,797.57 |
+| encode: composite          |    22,661 |     601.78 |
+| decode: u64 array (1000)   |   107,102 |   1,697.40 |
+| decode: typical message    |     2,447 |     150.42 |
+| decode: blob 1MB           |    39,522 | 392,692.15 |
+| decode: composite          |    21,708 |     570.68 |
+| decode: composite skip-all |    21,609 |     502.02 |
+
+**Read the two `blob 1MB` encode rows against each other, not against the rest.**
+Five of that message's bytes are metadata and a million are payload, so its MB/s
+is this machine's memory bandwidth rather than a statement about the library —
+and the streamed row comes out *ahead* of the one-shot one, because a 4 KiB window
+stays in L1 while a one-shot encode writes a megabyte out to memory. Their Ir/op
+gap has to be read with the same care, because on this runtime it is an artifact
+of how Callgrind counts a bulk copy: a bare `Array.Copy` of a megabyte costs
+~1,000,000 Ir whether the destination starts at offset 0 or at 5, while the same
+volume copied as 245 × 4096 bytes costs 70,629 — the big copy takes a
+repeat-string path Callgrind charges about one instruction per byte, the 4 KiB
+ones a vectorized path at ~0.07. So the honest reading of the pair is not
+"streaming is 6.5× cheaper": it is that the streamed row's 155,458 Ir sits
+84,829 above the 70,629 a bare chunked copy of the same bytes costs, i.e. **~346
+Ir per flush** is what the divisible-run path (CORELIB_PLAN §5.1) costs here.
+
+`decode: blob 1MB` is the same kind of row: the decoder hands the visitor a window
+into the input and copies nothing, so 39,522 Ir — 161 per 4096-byte chunk — buys a
+megabyte, and the MB/s figure says more about that than about memory.
+
+`decode: composite skip-all` lands within half a percent of `decode: composite`
+(21,609 against 21,708). In a push port "skip everything" is a visitor that
+overrides nothing, so what it saves is the callback bodies alone: the walk, the
+UTF-8 validation and the chunk bookkeeping are the decode, and none of them can be
+skipped. A router that materializes nothing pays essentially full price here.

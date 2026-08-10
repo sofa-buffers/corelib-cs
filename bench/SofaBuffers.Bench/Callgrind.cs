@@ -1,237 +1,120 @@
 /*
- * SofaBuffers C# - perf single-shot workloads for instruction counting.
+ * SofaBuffers C# - machine-independent instruction cost (Callgrind Ir/op).
  *
- * ARCHITECTURE.md §10.1 requires the `perf` tool to be CPU-speed independent.
- * The managed .NET runtime exposes no hardware cycle counter, so this provides
- * the spec's second acceptable technique: non-inlined single-shot entry points
- * (one operation per process invocation) that a profiler such as Callgrind can
- * count instructions on while excluding setup, exactly as the C/Go/Rust tools do.
+ * Companion to Bench.cs (throughput) and Perf.cs (per-op timing). Reports
+ * instructions retired per operation: unlike wall-clock or cycle counts, an
+ * instruction count is deterministic and independent of the host's clock speed
+ * and scheduler, so the numbers compare across machines (and against the
+ * C/C++/Rust/Go/Python/TypeScript/Java tools -- the workloads, ids and values
+ * are identical, because they all come from Workloads.cs).
  *
- * The reference workloads match the other languages: a 1000-element u64 array
- * and a "typical" mixed message, each for encode and decode.
+ * The .NET runtime JITs the hot code at run time, so there is no stable native
+ * `run_<workload>` symbol Callgrind could `--toggle-collect` on (and a
+ * single-shot toggle would mix in the one-time JIT compilation). So --
+ * BENCH_SPEC's second permitted mechanism, as in the Python, TypeScript and
+ * Java ports -- bench/run_callgrind.sh runs this program at two rep counts R1
+ * and R2 and subtracts the whole-process instruction counts,
  *
- * Example (instruction count for one encode, setup excluded):
- *   valgrind --tool=callgrind --collect-atstart=no \
- *     --toggle-collect='*Callgrind.OpEncodeU64Array*' \
- *     dotnet bin/Release/net9.0/SofaBuffers.Bench.dll encode_u64_array
+ *     Ir/op = ( Ir(R2) - Ir(R1) ) / ( R2 - R1 )
+ *
+ * which cancels *all* fixed cost exactly -- CLR startup, JIT compilation and the
+ * one-time setup -- leaving the pure per-op cost. For the subtraction to be
+ * clean the two runs must differ *only* in the measured rep count, so this
+ * program does a fixed warmup (independent of `reps`) that puts every measured
+ * op in compiled code, and run_callgrind.sh pins the JIT and sizes the heap so
+ * nothing else varies between runs. Invoked as:  <workload> [reps].
+ *
+ * Run via: bash bench/run_callgrind.sh
  *
  * SPDX-License-Identifier: MIT
  */
 
 using System;
-using System.Runtime.CompilerServices;
+using System.Collections.Generic;
+using System.Globalization;
+using System.IO;
+using static System.FormattableString;
 
 namespace SofaBuffers.Bench;
 
 internal static class Callgrind
 {
-    private const int N = 1000;
-
-    // Consumed so the JIT cannot elide the single operation.
-    internal static long Blackhole;
-
-    internal static readonly string[] Workloads =
-        { "encode_u64_array", "decode_u64_array", "encode_typical", "decode_typical" };
+    /// <summary>
+    /// Warmup operations per run, independent of <c>reps</c> so it cancels in the
+    /// subtraction.
+    /// </summary>
+    /// <remarks>
+    /// Its job is to put every measured op in <em>compiled</em> code. The script
+    /// pins <c>DOTNET_TieredCompilation=0</c>, so CoreCLR JITs each method to
+    /// full opt on its first call and even a handful of warmup ops reaches steady
+    /// state; the counts here leave room to spare and also settle the heap, so
+    /// the measured loop allocates into an already-touched gen0. The
+    /// <c>blob 1MB</c> rows get the smaller figure because they carry a megabyte
+    /// of copying per op, which is slow under Callgrind. Override with
+    /// <c>SOFAB_WARMUP</c>.
+    /// </remarks>
+    /// <param name="workload">the workload key</param>
+    /// <returns>number of warmup operations</returns>
+    internal static int WarmupFor(string workload)
+    {
+        string? env = Environment.GetEnvironmentVariable("SOFAB_WARMUP");
+        if (env != null
+            && int.TryParse(env, NumberStyles.Integer, CultureInfo.InvariantCulture, out int w)
+            && w >= 0)
+        {
+            return w;
+        }
+        return workload.Contains("blob", StringComparison.Ordinal) ? 200 : 2_000;
+    }
 
     /// <summary>
-    /// Run <paramref name="workload"/> <paramref name="reps"/> times after a
-    /// fixed warmup, for the two-rep-count subtraction driven by
-    /// bench/run_callgrind.sh. The managed runtime JITs the hot code at runtime,
-    /// so there is no stable native symbol for Callgrind to <c>--toggle-collect</c>
-    /// on; instead the whole process is counted at two rep counts and subtracted
-    /// (<c>Ir/op = (Ir(R2) - Ir(R1))/(R2 - R1)</c>), which cancels CLR startup,
-    /// JIT and setup. The fixed warmup (independent of <paramref name="reps"/>,
-    /// so it cancels too) drives the hot methods to their final tier before the
-    /// measured loop. Prints <c>bytes=&lt;n&gt;</c> on stderr for the size column.
+    /// One rep-mode run: warm up, then perform exactly <c>reps</c> measured
+    /// operations of one workload and report its encoded size on
+    /// <paramref name="error"/> for the table's <c>bytes</c> column.
     /// </summary>
-    internal static int RunReps(string workload, int reps)
+    /// <param name="args"><c>&lt;workload&gt; [reps]</c>; <c>reps</c> defaults to one</param>
+    /// <param name="error">where usage and the <c>bytes=</c> line go</param>
+    /// <returns>process exit status: 0 on success, 2 on a usage error</returns>
+    internal static int Run(string[] args, TextWriter error)
     {
-        // With tiered compilation disabled (see run_callgrind.sh) CoreCLR JITs
-        // each method to full opt on first call, so a small warmup suffices to
-        // reach steady state; it is fixed (independent of reps) so it cancels.
-        int warmup = 2_000;
-        var envW = Environment.GetEnvironmentVariable("SOFAB_WARMUP");
-        if (envW != null && int.TryParse(envW, out var w))
+        List<Workloads.Workload> all = Workloads.All();
+        if (args.Length < 1)
         {
-            warmup = w;
+            error.WriteLine("usage: SofaBuffers.Bench <workload> [reps]");
+            error.WriteLine("  workloads: " + string.Join(", ", all.ConvertAll(w => w.Name)));
+            return 2;
         }
 
-        int bytes;
-        Action body;
-        switch (workload)
+        string name = args[0];
+        int reps = 1;
+        if (args.Length >= 2
+            && !int.TryParse(args[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out reps))
         {
-            case "encode_u64_array":
-            {
-                ulong[] src = MakeU64();
-                var buf = new byte[N * 11 + 16];
-                bytes = OpEncodeU64Array(buf, src);
-                body = () => Blackhole += OpEncodeU64Array(buf, src);
-                break;
-            }
-            case "decode_u64_array":
-            {
-                byte[] wire = EncodeU64();
-                bytes = wire.Length;
-                body = () => Blackhole += OpDecodeU64Array(wire);
-                break;
-            }
-            case "encode_typical":
-            {
-                var buf = new byte[256];
-                bytes = OpEncodeTypical(buf);
-                body = () => Blackhole += OpEncodeTypical(buf);
-                break;
-            }
-            case "decode_typical":
-            {
-                byte[] wire = EncodeTypical();
-                bytes = wire.Length;
-                body = () => Blackhole += OpDecodeTypical(wire);
-                break;
-            }
-            default:
-                Console.Error.WriteLine($"perf: unknown workload '{workload}'");
-                Console.Error.WriteLine("       known: " + string.Join(", ", Workloads));
-                return 2;
+            error.WriteLine($"reps must be an integer, not '{args[1]}'");
+            return 2;
         }
 
-        for (int i = 0; i < warmup; i++)
+        Workloads.Workload? workload = all.Find(w => w.Name == name);
+        if (workload == null)
         {
-            body();
+            error.WriteLine($"unknown workload: {name}");
+            error.WriteLine("  known: " + string.Join(", ", all.ConvertAll(w => w.Name)));
+            return 2;
+        }
+
+        long sink = 0;
+        for (int i = WarmupFor(name); i > 0; i--)
+        {
+            sink += workload.Body();
         }
         for (int i = 0; i < reps; i++)
         {
-            body();
+            sink += workload.Body();
         }
-        Console.Error.WriteLine($"bytes={bytes} sink={Blackhole}");
+        Loop.Blackhole = sink;
+
+        // stderr feeds the size column; the sink keeps the work observable.
+        error.WriteLine(Invariant($"bytes={workload.Bytes} sink={Loop.Blackhole} reps={reps}"));
         return 0;
-    }
-
-    /// <summary>Run one workload exactly once (setup outside the measured call).</summary>
-    internal static int Run(string workload)
-    {
-        switch (workload)
-        {
-            case "encode_u64_array":
-            {
-                ulong[] src = MakeU64();
-                var buf = new byte[N * 11 + 16];
-                Blackhole += OpEncodeU64Array(buf, src);
-                return 0;
-            }
-            case "decode_u64_array":
-            {
-                byte[] wire = EncodeU64();
-                Blackhole += OpDecodeU64Array(wire);
-                return 0;
-            }
-            case "encode_typical":
-            {
-                var buf = new byte[256];
-                Blackhole += OpEncodeTypical(buf);
-                return 0;
-            }
-            case "decode_typical":
-            {
-                byte[] wire = EncodeTypical();
-                Blackhole += OpDecodeTypical(wire);
-                return 0;
-            }
-            default:
-                Console.Error.WriteLine($"perf: unknown workload '{workload}'");
-                Console.Error.WriteLine("       known: " + string.Join(", ", Workloads));
-                return 2;
-        }
-    }
-
-    // --- single-shot operations (NoInlining = a stable Callgrind toggle point) ---
-
-    [MethodImpl(MethodImplOptions.NoInlining)]
-    private static int OpEncodeU64Array(byte[] buf, ulong[] src)
-    {
-        var os = new OStream(buf);
-        os.WriteArrayUnsigned(1, src);
-        return os.BytesUsed;
-    }
-
-    [MethodImpl(MethodImplOptions.NoInlining)]
-    private static long OpDecodeU64Array(byte[] wire)
-    {
-        var c = new Checksum();
-        new IStream().Feed(wire, c);
-        return c.Acc;
-    }
-
-    [MethodImpl(MethodImplOptions.NoInlining)]
-    private static int OpEncodeTypical(byte[] buf)
-    {
-        var os = new OStream(buf);
-        EncodeTypical(os);
-        return os.BytesUsed;
-    }
-
-    [MethodImpl(MethodImplOptions.NoInlining)]
-    private static long OpDecodeTypical(byte[] wire)
-    {
-        var c = new Checksum();
-        new IStream().Feed(wire, c);
-        return c.Acc;
-    }
-
-    // --- shared message builders (identical to bench/perf) ------------------
-
-    private static ulong[] MakeU64()
-    {
-        var a = new ulong[N];
-        for (int i = 0; i < N; i++)
-        {
-            a[i] = (ulong)i * 0x9E37_79B9_7F4A_7C15UL;
-        }
-        return a;
-    }
-
-    private static byte[] EncodeU64()
-    {
-        var buf = new byte[N * 11 + 16];
-        var os = new OStream(buf);
-        os.WriteArrayUnsigned(1, MakeU64());
-        var wire = new byte[os.BytesUsed];
-        Array.Copy(buf, wire, os.BytesUsed);
-        return wire;
-    }
-
-    private static void EncodeTypical(OStream os)
-    {
-        os.WriteUnsigned(1, 0xDEAD_BEEFUL);
-        os.WriteSigned(2, -12345);
-        os.WriteBoolean(3, true);
-        os.WriteFp32(4, 3.14159f);
-        os.WriteString(5, "sofab");
-        os.WriteArrayUnsigned(6, new ushort[] { 10, 20, 30, 40 });
-        os.WriteSequenceBeginLazy(7);
-        os.WriteUnsigned(1, 99);
-        os.WriteSigned(2, -7);
-        os.WriteSequenceEnd();
-    }
-
-    private static byte[] EncodeTypical()
-    {
-        var buf = new byte[256];
-        var os = new OStream(buf);
-        EncodeTypical(os);
-        var wire = new byte[os.BytesUsed];
-        Array.Copy(buf, wire, os.BytesUsed);
-        return wire;
-    }
-
-    private sealed class Checksum : IVisitor
-    {
-        public long Acc;
-        public void Unsigned(int id, ulong v) { Acc += (long)v ^ id; }
-        public void Signed(int id, long v) { Acc += v ^ id; }
-        public void Fp32(int id, float v) { Acc += BitConverter.SingleToInt32Bits(v); }
-        public void Fp64(int id, double v) { Acc += BitConverter.DoubleToInt64Bits(v); }
-        public void String(int id, int total, int offset, byte[] d, int o, int l) { Acc += l; }
-        public void Blob(int id, int total, int offset, byte[] d, int o, int l) { Acc += l; }
     }
 }
