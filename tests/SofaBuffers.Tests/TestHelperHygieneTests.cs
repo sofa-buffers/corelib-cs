@@ -33,9 +33,15 @@ public class TestHelperHygieneTests
     /// A declaration -- not a call -- of a method returning <c>byte[]</c> named
     /// <c>Bytes</c> or <c>Encode</c>. A call site never has the return type in
     /// front of the name, so <c>byte[] wire = Encode(...)</c> does not match.
+    /// The parameter list must be non-empty: both shared helpers take arguments
+    /// (a byte-literal list, an encode body, a buffer size), so any copy of
+    /// either still matches -- while a nullary <c>byte[] Encode()</c> does not.
+    /// That spelling is the generated object's one-shot method, whose name
+    /// CORELIB_PLAN §6.1.1 fixes and which the README's stand-in therefore has
+    /// to reproduce exactly (issue #62); it is not a copy of this helper.
     /// </summary>
     private static readonly Regex Declaration =
-        new(@"byte\[\]\s+(Bytes|Encode)\s*\(", RegexOptions.Compiled);
+        new(@"byte\[\]\s+(Bytes|Encode)\s*\(\s*[^)\s]", RegexOptions.Compiled);
 
     /// <summary>The only file allowed to declare them.</summary>
     private const string Home = "TestBytes.cs";
