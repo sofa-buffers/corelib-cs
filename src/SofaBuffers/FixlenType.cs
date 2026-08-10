@@ -25,10 +25,3 @@ public enum FixlenType
     /// <summary>Arbitrary raw bytes.</summary>
     Blob = 0x3,
 }
-
-/// <summary>Helpers for the <see cref="FixlenType"/> wire encoding.</summary>
-internal static class FixlenTypeExtensions
-{
-    /// <summary>The 3-bit wire tag (0..3) for this sub-type.</summary>
-    public static int Raw(this FixlenType type) => (int)type;
-}
