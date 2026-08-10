@@ -10,9 +10,9 @@ namespace sofab;
 /// Library-level constants for the SofaBuffers (<c>sofab</c>) core.
 /// </summary>
 /// <remarks>
-/// Public symbols live under the <c>sofab</c> namespace (per the architecture
-/// spec); this type collects library-level constants such as the API version,
-/// reachable as <c>sofab.Sofab.*</c>.
+/// Public symbols live under the <c>sofab</c> namespace, as CORELIB_PLAN §6 and
+/// its §13 checklist require; this type collects library-level constants such as
+/// the API version, reachable as <c>sofab.Sofab.*</c>.
 /// </remarks>
 public static class Sofab
 {

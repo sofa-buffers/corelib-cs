@@ -1,9 +1,11 @@
 /*
  * SofaBuffers C# - shared conformance suite.
  *
- * Replays the language-agnostic test vectors (assets/test_vectors.json, copied
- * verbatim from the documentation repo) through the encoder and decoder, as
- * required by the SofaBuffers architecture spec (ARCHITECTURE.md §7). Each
+ * Replays the language-agnostic test vectors through the encoder and decoder, as
+ * CORELIB_PLAN §7.1 requires of every port. They are read from
+ * assets/test_vectors.json, where §8 puts them, and are a verbatim copy of the
+ * set corelib-c-cpp generates -- that repo is their source of truth, and the
+ * vectors outrank the prose. Each
  * vector is exercised three ways:
  *
  *   1. encode         -- replay fields at the given offset; bytes must equal serialized.hex
