@@ -1,5 +1,6 @@
 /*
- * SofaBuffers C# - the README's build/benchmark facts stay true (issue #63).
+ * SofaBuffers C# - the README keeps the family's shape and its facts stay true
+ * (issues #63, #64).
  *
  * CORELIB_PLAN §9 opens by demanding that "every fact, command, version number,
  * dependency, feature flag, and API name the README states must match the code
@@ -10,11 +11,17 @@
  * multi-target, and its two `dotnet run` benchmark lines were unrunnable as
  * written -- a multi-TFM project refuses to run without `--framework`.
  *
+ * §9 also fixes the *shape*: "do not change the section ordering and do not
+ * invent new top-level sections". This README had grown a `## Strings & UTF-8`
+ * chapter no other port carries, so that guard is checked here too — together
+ * with the facts that chapter held, which had to survive the move into the
+ * sections §9 provides.
+ *
  * These are lint-shaped tests, not behaviour tests. They read the README, the
  * three .csproj files and bench/run_callgrind.sh from the source tree and fail
- * when the documented target frameworks, SDK requirement, benchmark command
- * lines, tool inventory or Callgrind workload list stop matching what is
- * actually in the tree.
+ * when the documented section list, target frameworks, SDK requirement,
+ * benchmark command lines, tool inventory or Callgrind workload list stop
+ * matching what is actually in the tree.
  *
  * SPDX-License-Identifier: MIT
  */
@@ -67,14 +74,117 @@ public class ReadmeFactsTests
     private static int Major(string tfm) =>
         int.Parse(Regex.Match(tfm, @"^net(\d+)\.").Groups[1].Value);
 
-    /// <summary>The text of a `## Heading` section, up to the next `## `.</summary>
+    /// <summary>
+    /// The text of a `## Heading` / `### Heading` section, up to the next heading
+    /// of the same or a shallower level (so a `## ` section carries its `### `
+    /// subsections, and a `### ` one stops at its sibling).
+    /// </summary>
     private static string Section(string heading)
     {
         string readme = Readme();
         int start = readme.IndexOf(heading, StringComparison.Ordinal);
         Assert.True(start >= 0, "README has no " + heading + " section");
-        int end = readme.IndexOf("\n## ", start + heading.Length, StringComparison.Ordinal);
-        return end < 0 ? readme.Substring(start) : readme.Substring(start, end - start);
+        int level = heading.TakeWhile(c => c == '#').Count();
+
+        foreach ((int index, int found) in Headings(readme))
+        {
+            if (index > start && found <= level)
+            {
+                return readme.Substring(start, index - start);
+            }
+        }
+        return readme.Substring(start);
+    }
+
+    /// <summary>
+    /// Offset and level of every Markdown heading, skipping fenced code blocks —
+    /// a shell comment such as `# workloads: ...` inside a ```bash fence is not a
+    /// heading, and treating it as one would cut a section short.
+    /// </summary>
+    private static IEnumerable<(int Index, int Level)> Headings(string text)
+    {
+        bool fenced = false;
+        int index = 0;
+        foreach (string line in text.Split('\n'))
+        {
+            if (line.StartsWith("```", StringComparison.Ordinal))
+            {
+                fenced = !fenced;
+            }
+            else if (!fenced)
+            {
+                int level = line.TakeWhile(c => c == '#').Count();
+                if (level > 0 && level < line.Length && line[level] == ' ')
+                {
+                    yield return (index, level);
+                }
+            }
+            index += line.Length + 1;
+        }
+    }
+
+    /// <summary>Every `## Heading` in the README, in file order.</summary>
+    private static string[] TopLevelSections()
+    {
+        string readme = Readme();
+        return Headings(readme)
+            .Where(h => h.Level == 2)
+            .Select(h => readme.Substring(h.Index).Split('\n')[0].Substring(3).Trim())
+            .ToArray();
+    }
+
+    /// <summary>
+    /// CORELIB_PLAN §9: "Do not change the section ordering and do not invent new
+    /// top-level sections; that shared shape is the point." This README carried a
+    /// `## Strings &amp; UTF-8` chapter no other port has (issue #64) — its facts
+    /// belong in the sections §9 already provides, not in one of their own.
+    /// `## Feature flags` is not an invention: every port in the family carries
+    /// it, so it is de-facto family shape.
+    /// </summary>
+    [Fact]
+    public void ReadmeTopLevelSectionsAreTheSharedFamilyShape()
+    {
+        if (!HaveTree) return;
+
+        Assert.Equal(
+            new[]
+            {
+                "SofaBuffers C# library",  // §9.2
+                "Why this design",         // §9.3
+                "Usage",                   // §9.5
+                "Memory handling",         // §9.6
+                "Feature flags",           // family-wide
+                "Build & test",            // §9.7
+                "Benchmarks",              // §9.8
+            },
+            TopLevelSections());
+    }
+
+    /// <summary>
+    /// Deleting the invented chapter must not delete what it said. The two facts
+    /// it carried have a home in the §9 shape: the absent `SOFAB_STRICT_UTF8`
+    /// knob belongs where a reader looks for build toggles, and the encode-side
+    /// refusal belongs with the `WriteString` example that can trip it.
+    /// </summary>
+    [Fact]
+    public void ReadmeKeepsTheUtf8FactsInTheSectionsSection9Provides()
+    {
+        if (!HaveTree) return;
+
+        string flags = Section("## Feature flags");
+        Assert.Contains("SOFAB_STRICT_UTF8", flags, StringComparison.Ordinal);
+        Assert.Contains("always strict", flags, StringComparison.Ordinal);
+
+        // Encode side: the refusal, and that it is not a silent U+FFFD swap.
+        string serialize = Section("### Serialize\n");
+        Assert.Contains("unpaired surrogate", serialize, StringComparison.Ordinal);
+        Assert.Contains("U+FFFD", serialize, StringComparison.Ordinal);
+        Assert.Contains("SofabError.Argument", serialize, StringComparison.Ordinal);
+
+        // Decode side: the corelib transcodes nothing; generated code judges.
+        string deserialize = Section("### Deserialize\n");
+        Assert.Contains("InvalidMessage", deserialize, StringComparison.Ordinal);
+        Assert.Contains("strict/fatal", deserialize, StringComparison.Ordinal);
     }
 
     /// <summary>

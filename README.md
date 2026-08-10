@@ -92,6 +92,18 @@ bytes. Anything else is a malformed `fixlen_word` that every port, this one
 included, rejects as `InvalidMessage` on decode, so the encoder refuses it up
 front with `SofabException(SofabError.Argument)`, before writing a byte.
 
+`WriteString` takes a C# `string`, a Unicode type, and transcodes it to UTF-8 on
+the way out — `WriteBlob` is the call for arbitrary bytes (MESSAGE_SPEC §8). A
+value with no valid UTF-8 encoding, i.e. one carrying an unpaired surrogate, is
+refused with `SofabException(SofabError.Argument)` rather than silently
+substituted with `U+FFFD` the way the default `Encoding.UTF8` does; silent
+replacement is a data mutation the spec forbids. The refusal is **atomic at
+every length**: no byte is written, `BytesUsed` does not advance, and a header
+held back by `WriteSequenceBeginLazy` is not committed, so catching it and
+closing the sequence still lets an otherwise-empty sequence vanish
+(MESSAGE_SPEC §2) instead of framing an empty `26 07`. Valid strings — embedded
+`U+0000` included — encode to exactly the bytes `Encoding.UTF8` would produce.
+
 ### Serialize stream
 
 Give the `OStream` a `FlushSink`, whose `(byte[] data, int offset, int length)`
@@ -201,6 +213,12 @@ any payload: `ArrayBegin(id, kind, count)` for an array, `FixlenBegin(id,
 subtype, total)` for a string / blob / float. That is where a schema `count` or
 `maxlen` bound belongs — judged there, the verdict cannot depend on where the
 input happened to be chunked (CORELIB_PLAN §5.2).
+
+`String` payloads reach the visitor as raw wire bytes: the decoder transcodes
+nothing and validates nothing, and a field the visitor ignores is skipped
+without ever being looked at (CORELIB_PLAN §6.4). Generated code materializes
+the C# `string` with a strict/fatal UTF-8 decoder, which is where invalid UTF-8
+becomes the `InvalidMessage` outcome.
 
 ### Deserialize stream
 
@@ -420,32 +438,12 @@ of the bytes stays with the caller.
   Scalars and floats are passed by value (no boxing). A visitor that retains bytes
   must copy the chunk.
 
-## Strings & UTF-8
-
-A `string` is UTF-8 text on the wire (MESSAGE_SPEC §8); `blob` is the type for
-arbitrary bytes. Because C# `string` is a Unicode (UTF-16) type it can never
-hold non-UTF-8 bytes, so SofaBuffers C# is **always strict** — there is no
-`SOFAB_STRICT_UTF8` toggle to turn off (CORELIB_PLAN §6.4: "Unicode-string
-targets are always strict").
-
-- **Encode.** `OStream.WriteString` refuses a value that cannot be encoded as
-  valid UTF-8 — i.e. one carrying an unpaired surrogate — with
-  `SofabException(SofabError.Argument)`, *before* writing any bytes. It never
-  silently substitutes `U+FFFD` the way the default `Encoding.UTF8` does; silent
-  replacement is a data mutation the spec forbids. Valid strings (including
-  embedded `U+0000`) encode to exactly the same bytes as before.
-  The refusal is **atomic at every length**: it neither advances `BytesUsed` nor
-  commits a header held back by `WriteSequenceBeginLazy`, so catching it and
-  closing the sequence still lets an otherwise-empty sequence vanish
-  (MESSAGE_SPEC §2) instead of framing an empty `26 07`.
-- **Decode.** The decoder hands the raw string bytes to your visitor without
-  transcoding; generated code materializes the `string` with a strict/fatal
-  decoder, producing the `InvalidMessage` outcome on invalid UTF-8. Skipped
-  fields are never validated.
-
 ## Feature flags
 
-No build toggles — always the full format.
+No build toggles — always the full format. In particular there is no
+`SOFAB_STRICT_UTF8` knob to turn off: C# `string` is a Unicode type and can
+never hold non-UTF-8 bytes, so this port is **always strict** (CORELIB_PLAN
+§6.4: "Unicode-string targets are always strict").
 
 ## Build & test
 
