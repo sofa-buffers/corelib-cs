@@ -26,10 +26,17 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # Both SDKs are installed even though the documentation is generated once:
+      # the restore below resolves *all* TargetFrameworks in the solution, so a
+      # net9.0-only SDK could not restore the net10.0 leg (ci.yml installs both
+      # for the same reason). That the hosted image happens to ship a .NET 10 SDK
+      # `setup-dotnet` leaves in place is not something to rely on.
       - name: Set up .NET
         uses: actions/setup-dotnet@v6
         with:
-          dotnet-version: '9.0.x'
+          dotnet-version: |
+            9.0.x
+            10.0.x
 
       - name: Install DocFX
         run: |
