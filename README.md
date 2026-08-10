@@ -455,9 +455,11 @@ dotnet test  SofaBuffers.sln                # run the xUnit suite
 
 Requires the .NET SDK 10 and the .NET 9 runtime (see [Requirements](#requirements)).
 All three commands cover both target frameworks; append `-f net9.0` / `-f net10.0`
-to `build` or `test` to narrow a run to one of them, which is what the CI matrix
-does. The `.devcontainer/` builds a ready-to-use image with the SDKs and tooling
-preinstalled. Tests live in `tests/SofaBuffers.Tests/`, including
+to `build` or `test` to narrow a run to one of them, and `-c Debug` / `-c Release`
+to pick a configuration. CI crosses the two axes: four legs build *and* run the
+suite in Debug and Release on each framework, so unoptimized code paths and
+`#if DEBUG` code are compiled and exercised too. The `.devcontainer/` builds a
+ready-to-use image with the SDKs and tooling preinstalled. Tests live in `tests/SofaBuffers.Tests/`, including
 conformance replay of the shared language-agnostic vectors (byte-exact encode,
 field-match decode, byte-at-a-time chunked decode). Helpers used by more than one
 test file live in `tests/SofaBuffers.Tests/Common/` — `RecordingVisitor` plus
