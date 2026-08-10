@@ -18,4 +18,11 @@
     <ProjectReference Include="../../src/SofaBuffers/SofaBuffers.csproj" />
   </ItemGroup>
 
+  <!-- BENCH_SPEC is a cross-language contract about datasets, timing and output
+       grammar, and nothing inside the library can check it. The test project
+       drives these tools directly, so it sees their internals. -->
+  <ItemGroup>
+    <InternalsVisibleTo Include="SofaBuffers.Tests" />
+  </ItemGroup>
+
 </Project>

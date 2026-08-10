@@ -12,62 +12,39 @@
  *      intrinsic), so this line reports that it is unavailable, exactly as the
  *      Java tool does and as the C/Rust tools do off-arch. CPU time/op below is
  *      the runtime-independent proxy for code cost. For a fully CPU-speed-
- *      independent figure, run the single-shot Callgrind workloads instead
- *      (see Callgrind.cs / `SofaBuffers.Bench <workload>`).
+ *      independent figure, run bench/run_callgrind.sh, which is available on
+ *      every target and has no such fallback.
  *   2. throughput MB/s + CPU time/op -- a "speedtest" for this machine, derived
  *      from process CPU time (not wall-clock), the .NET equivalent of the C
  *      tool's clock(). MB = 1e6 bytes.
  *
- * Both metrics are gathered over the same adaptive ~1 s CPU-time loop, so they
- * describe the exact same work.
+ * Both metrics are gathered over the same adaptive ~1 s CPU-time loop (Loop.cs,
+ * shared with the throughput tool), so they describe the exact same work.
  *
  * SPDX-License-Identifier: MIT
  */
 
 using System;
-using System.Diagnostics;
+using System.IO;
 using System.Text;
+using static System.FormattableString;
 
 namespace SofaBuffers.Bench;
 
 internal static class Perf
 {
-    private const double MinSeconds = 1.0;
-
-    // Batch size for the timed loops: enough iterations that one clock reading
-    // is a rounding error against them. CpuNow() reads /proc/self/stat, which
-    // costs on the order of tens of microseconds -- far more than one encode of
-    // the 170-byte message -- so reading it once per iteration, as these loops
-    // used to, measures mostly the clock (and, because the cycle counter
-    // brackets the whole loop, would pollute cycles/op too on ports that have
-    // one). Reading it once per batch puts it under ~0.01% of the result.
-    private const double BatchSeconds = 0.01;
-
-    // Consumed after the loops so the JIT cannot elide the work.
-    internal static long Blackhole;
-
     // --- hardware cycle counter ---------------------------------------------
     // The C/C++/Rust tools read the CPU's time-stamp counter (x86 TSC /
     // AArch64 cntvct_el0) for a CPU-speed-independent cost figure. The managed
     // .NET runtime exposes no portable cycle-counter intrinsic, so -- like the
     // Java tool -- we report cycles/op as unavailable and rely on CPU time/op
     // (process CPU time, runtime/clock independent) as the code-cost proxy.
+    // `readonly` rather than `const`: a constant false would make the counter
+    // branch unreachable code, and this is a port-specific fact, not a language
+    // one — a future .NET intrinsic flips it here and nowhere else.
     private static readonly bool HaveCycles = false;
 
-    private static ulong Cycles() => 0;
-
-    // Cached: Process.GetCurrentProcess() allocates a fresh Process object, and
-    // doing that inside a measured loop adds GC pressure to a benchmark of an
-    // allocation-sensitive codec. TotalProcessorTime is cached on the object,
-    // so Refresh() first or it would never advance.
-    private static readonly Process Self = Process.GetCurrentProcess();
-
-    /// <summary>Process CPU time in seconds (not wall-clock), mirroring C clock().</summary>
-    private static double CpuNow()
-    {
-        Self.Refresh();
-        return Self.TotalProcessorTime.TotalSeconds;
-    }
+    private static double Cycles() => 0;
 
     // --- message under test (identical to perf.c / perf.rs) ----------------
     private const string PerfString = "perf-benchmark-message";
@@ -77,7 +54,14 @@ internal static class Perf
         { -100_000, -200_000, -300_000, -400_000, -500_000, -600_000, -700_000, -800_000 };
     private static readonly double[] PerfFp64 = { 3.14159265, 6.28318530, 9.42477795, 12.56637060 };
 
-    private static int PerfEncode(byte[] buf)
+    /// <summary>
+    /// BENCH_SPEC's twelve-field <c>perf</c> message. Its encoded size — 170
+    /// bytes on every implementation — is a cross-port parity check: a different
+    /// number here means the encoding has diverged.
+    /// </summary>
+    /// <param name="buf">output buffer (at least 170 bytes)</param>
+    /// <returns>encoded size in bytes</returns>
+    internal static int PerfEncode(byte[] buf)
     {
         var os = new OStream(buf);
         os.WriteUnsigned(1, 0xDEAD_BEEFUL);
@@ -117,7 +101,9 @@ internal static class Perf
         }
 
         public void Signed(int id, long v) { Acc += v ^ id; }
+
         public void Fp32(int id, float v) { Acc += BitConverter.SingleToInt32Bits(v); }
+
         public void Fp64(int id, double v) { Acc += BitConverter.DoubleToInt64Bits(v); }
 
         public void String(int id, int total, int offset, byte[] d, int o, int l)
@@ -132,8 +118,11 @@ internal static class Perf
         }
 
         public void Blob(int id, int total, int offset, byte[] d, int o, int l) { Acc += l; }
+
         public void ArrayBegin(int id, ArrayKind kind, int count) { /* no-op */ }
+
         public void SequenceBegin(int id) { Depth++; }
+
         public void SequenceEnd() { Depth--; }
     }
 
@@ -142,149 +131,44 @@ internal static class Perf
         new IStream().Feed(buf, 0, len, outp);
     }
 
-    private sealed class Result
+    private static void Report(TextWriter output, string what, Loop.Result r, int bytes)
     {
-        public long Iters;
-        public double CyclesOp;
-        public double NsOp;
-        public double MbS;
-    }
-
-    private static void Report(string what, Result r, int bytes)
-    {
-        Console.WriteLine($"\n--- perf: {what} ---");
-        Console.WriteLine($"  iterations    : {r.Iters}");
-        Console.WriteLine($"  message size  : {bytes} bytes");
+        output.WriteLine();
+        output.WriteLine($"--- perf: {what} ---");
+        output.WriteLine(Invariant($"  iterations    : {r.Iterations}"));
+        output.WriteLine(Invariant($"  message size  : {bytes} bytes"));
         if (HaveCycles)
         {
-            Console.WriteLine($"  cycles/op     : {r.CyclesOp:F1}  (hardware cycle counter)");
+            output.WriteLine(Invariant($"  cycles/op     : {Cycles():F1}  (hardware cycle counter)"));
         }
         else
         {
-            Console.WriteLine("  cycles/op     : (cycle counter unavailable on this arch)");
+            output.WriteLine("  cycles/op     : (cycle counter unavailable on .NET)");
         }
-        Console.WriteLine($"  CPU time/op   : {r.NsOp:F1} ns  (process CPU time, not wall-clock)");
-        Console.WriteLine($"  throughput    : {r.MbS:F1} MB/s  (speedtest, MB = 1e6 bytes)");
+        output.WriteLine(Invariant($"  CPU time/op   : {r.NanosPerOp:F1} ns  (process CPU time, not wall-clock)"));
+        output.WriteLine(Invariant(
+            $"  throughput    : {r.MegabytesPerSecond(bytes):F1} MB/s  (speedtest, MB = 1e6 bytes)"));
     }
 
-    private static (Result, int) MeasureEncode(byte[] buf)
-    {
-        long sink = 0;
-        for (int i = 0; i < 200_000; i++)
-        {
-            sink += PerfEncode(buf); // warmup / JIT (before calibration, so the batch is sized against compiled code)
-        }
-        int msg = PerfEncode(buf);
+    internal static void Run() => Run(Console.Out, Loop.Seconds());
 
-        // Grow a batch until it spans BatchSeconds, so the clock read that ends
-        // it is a rounding error against the work it timed.
-        long batch = 1;
-        for (; ; batch *= 2)
-        {
-            double b0 = CpuNow();
-            for (long k = 0; k < batch; k++)
-            {
-                sink += PerfEncode(buf);
-            }
-            if (CpuNow() - b0 >= BatchSeconds)
-            {
-                break;
-            }
-        }
-
-        long it = 0;
-        ulong c0 = Cycles();
-        double t0 = CpuNow();
-        double el;
-        do
-        {
-            for (long k = 0; k < batch; k++)
-            {
-                sink += PerfEncode(buf);
-            }
-            it += batch;
-            el = CpuNow() - t0;
-        }
-        while (el < MinSeconds);
-        ulong c1 = Cycles();
-        Blackhole = sink;
-
-        var r = new Result
-        {
-            Iters = it,
-            CyclesOp = (double)(c1 - c0) / it,
-            NsOp = el / it * 1e9,
-            MbS = (double)msg * it / el / 1e6,
-        };
-        return (r, msg);
-    }
-
-    private static Result MeasureDecode(byte[] buf, int len)
-    {
-        long sink = 0;
-        for (int i = 0; i < 200_000; i++)
-        {
-            // warmup / JIT (before calibration, so the batch is sized against compiled code)
-            var o = new PerfOut();
-            PerfDecode(buf, len, o);
-            sink += o.Acc;
-        }
-
-        // Grow a batch until it spans BatchSeconds, so the clock read that ends
-        // it is a rounding error against the work it timed. The per-op PerfOut
-        // construction stays inside the batch: it is part of the measured op.
-        long batch = 1;
-        for (; ; batch *= 2)
-        {
-            double b0 = CpuNow();
-            for (long k = 0; k < batch; k++)
-            {
-                var o = new PerfOut();
-                PerfDecode(buf, len, o);
-                sink += o.Acc;
-            }
-            if (CpuNow() - b0 >= BatchSeconds)
-            {
-                break;
-            }
-        }
-
-        long it = 0;
-        ulong c0 = Cycles();
-        double t0 = CpuNow();
-        double el;
-        do
-        {
-            for (long k = 0; k < batch; k++)
-            {
-                var o = new PerfOut();
-                PerfDecode(buf, len, o);
-                sink += o.Acc;
-            }
-            it += batch;
-            el = CpuNow() - t0;
-        }
-        while (el < MinSeconds);
-        ulong c1 = Cycles();
-        Blackhole = sink;
-
-        return new Result
-        {
-            Iters = it,
-            CyclesOp = (double)(c1 - c0) / it,
-            NsOp = el / it * 1e9,
-            MbS = (double)len * it / el / 1e6,
-        };
-    }
-
-    internal static void Run()
+    /// <summary>
+    /// Measure one encode and one decode of the <c>perf</c> message and print
+    /// BENCH_SPEC's per-op report to <paramref name="output"/>. Every formatted
+    /// number is invariant: the harness matches <c>[\d.]+</c>, which a
+    /// comma-decimal culture would not produce.
+    /// </summary>
+    /// <param name="output">where the report goes</param>
+    /// <param name="seconds">CPU seconds per measurement (BENCH_SPEC: ~1)</param>
+    internal static void Run(TextWriter output, double seconds)
     {
         var buffer = new byte[512];
+        int msgSize = PerfEncode(buffer);
 
-        Console.WriteLine("=== SofaBuffers C# per-op cost (cycles/op + throughput MB/s) ===");
+        output.WriteLine("=== SofaBuffers C# per-op cost (cycles/op + throughput MB/s) ===");
 
-        (Result enc, int msgSize) = MeasureEncode(buffer);
-        Report("serialize (stream API)", enc, msgSize);
+        Loop.Result enc = Loop.Run(() => PerfEncode(buffer), seconds);
+        Report(output, "serialize (stream API)", enc, msgSize);
 
         // Self-check that the decode actually reproduced the data.
         var check = new PerfOut();
@@ -301,14 +185,21 @@ internal static class Perf
             Environment.Exit(1);
         }
 
-        Result dec = MeasureDecode(buffer, msgSize);
-        Report("deserialize (stream API)", dec, msgSize);
+        Loop.Result dec = Loop.Run(
+            () =>
+            {
+                var o = new PerfOut();
+                PerfDecode(buffer, msgSize, o);
+                return o.Acc;
+            },
+            seconds);
+        Report(output, "deserialize (stream API)", dec, msgSize);
 
-        Console.WriteLine();
-        Console.WriteLine("cycles/op tracks code cost; MB/s is this machine's throughput.");
-        if (Blackhole == 42)
+        output.WriteLine();
+        output.WriteLine("cycles/op tracks code cost; MB/s is this machine's throughput.");
+        if (Loop.Blackhole == 42)
         {
-            Console.Write("");
+            output.Write(""); // keep the blackhole observably live
         }
     }
 }

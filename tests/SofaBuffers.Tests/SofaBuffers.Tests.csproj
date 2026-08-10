@@ -18,6 +18,10 @@
 
   <ItemGroup>
     <ProjectReference Include="../../src/SofaBuffers/SofaBuffers.csproj" />
+    <!-- The benchmark tools are tested like any other code here: their datasets
+         and output grammar are BENCH_SPEC's cross-language contract, and a row
+         that goes missing is dropped from the comparison tables in silence. -->
+    <ProjectReference Include="../../bench/SofaBuffers.Bench/SofaBuffers.Bench.csproj" />
   </ItemGroup>
 
   <!-- The shared, language-agnostic conformance suite (single source of truth

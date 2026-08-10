@@ -313,10 +313,13 @@ public class ReadmeFactsTests
     {
         if (!HaveTree) return;
 
-        Match declared = Regex.Match(Read("bench", "run_callgrind.sh"), @"WORKLOADS=\(([^)]*)\)");
+        // `WORKLOADS="${WORKLOADS:-a b c}"`: a default the environment can
+        // override, so a caller can measure one row without editing the script.
+        Match declared = Regex.Match(Read("bench", "run_callgrind.sh"),
+                                     @"WORKLOADS=""\$\{WORKLOADS:-([^}]*)\}""");
         Assert.True(declared.Success, "run_callgrind.sh declares no WORKLOADS");
         string[] script = declared.Groups[1].Value
-            .Split(new[] { ' ', '\t', '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries)
+            .Split(new[] { ' ', '\t', '\n', '\r', '\\' }, StringSplitOptions.RemoveEmptyEntries)
             .OrderBy(s => s, StringComparer.Ordinal).ToArray();
 
         Match listed = Regex.Match(Section("## Benchmarks"), @"workloads:([^\n]*)");
