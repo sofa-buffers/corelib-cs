@@ -16,21 +16,12 @@
 using System;
 using SofaBuffers.Tests.Common;
 using Xunit;
+using static SofaBuffers.Tests.Common.TestBytes;
 
 namespace SofaBuffers.Tests;
 
 public class InvalidLatchTests
 {
-    private static byte[] Bytes(params int[] values)
-    {
-        var outp = new byte[values.Length];
-        for (int i = 0; i < values.Length; i++)
-        {
-            outp[i] = (byte)values[i];
-        }
-        return outp;
-    }
-
     /// <summary>A whole, well-formed message: unsigned field id 0 = 42.</summary>
     private static byte[] Good() => Bytes(0x00, 0x2A);
 

@@ -202,7 +202,7 @@ public class TestVectorsConformanceTests
     // --- decode: normalized event tokens -----------------------------------
 
     /// <summary>Records decoded fields as flat tokens, coalescing string/blob chunks.</summary>
-    private sealed class TokenVisitor : IVisitor
+    private class TokenVisitor : IVisitor
     {
         public readonly List<string> Tokens = new();
         private readonly MemoryStream _pending = new();
@@ -210,15 +210,22 @@ public class TestVectorsConformanceTests
         private int _id;
         private int _total;
 
-        public void Unsigned(int id, ulong v) => Tokens.Add($"u:{id}={v}");
-        public void Signed(int id, long v) => Tokens.Add($"s:{id}={v}");
-        public void Fp32(int id, float v) => Tokens.Add($"f32:{id}={BitConverter.SingleToInt32Bits(v)}");
-        public void Fp64(int id, double v) => Tokens.Add($"f64:{id}={BitConverter.DoubleToInt64Bits(v)}");
-        public void String(int id, int total, int offset, byte[] d, int o, int l) => Chunk("str", id, total, d, o, l);
-        public void Blob(int id, int total, int offset, byte[] d, int o, int l) => Chunk("blob", id, total, d, o, l);
-        public void ArrayBegin(int id, ArrayKind kind, int count) => Tokens.Add($"arr:{id}:{kind}:{count}");
-        public void SequenceBegin(int id) => Tokens.Add($"seq{{:{id}");
-        public void SequenceEnd() => Tokens.Add("seq}");
+        public void Unsigned(int id, ulong v) { if (!Drop(id)) Tokens.Add($"u:{id}={v}"); }
+        public void Signed(int id, long v) { if (!Drop(id)) Tokens.Add($"s:{id}={v}"); }
+        public void Fp32(int id, float v) { if (!Drop(id)) Tokens.Add($"f32:{id}={BitConverter.SingleToInt32Bits(v)}"); }
+        public void Fp64(int id, double v) { if (!Drop(id)) Tokens.Add($"f64:{id}={BitConverter.DoubleToInt64Bits(v)}"); }
+        public void String(int id, int total, int offset, byte[] d, int o, int l) { if (!Drop(id)) Chunk("str", id, total, d, o, l); }
+        public void Blob(int id, int total, int offset, byte[] d, int o, int l) { if (!Drop(id)) Chunk("blob", id, total, d, o, l); }
+        public void ArrayBegin(int id, ArrayKind kind, int count) { if (!Drop(id)) Tokens.Add($"arr:{id}:{kind}:{count}"); }
+        public virtual void SequenceBegin(int id) => Tokens.Add($"seq{{:{id}");
+        public virtual void SequenceEnd() => Tokens.Add("seq}");
+
+        /// <summary>
+        /// Whether the field currently being delivered must be dropped instead of
+        /// recorded. Always false for the plain recorder; the sole extension point
+        /// <see cref="SkippingTokenVisitor"/> needs beyond the two sequence hooks.
+        /// </summary>
+        protected virtual bool Drop(int id) => false;
 
         private void Chunk(string kind, int id, int total, byte[] d, int o, int l)
         {
@@ -305,14 +312,9 @@ public class TestVectorsConformanceTests
     /// care about, the visitor-pattern equivalent of the C API's "don't bind a
     /// destination" skip.
     /// </summary>
-    private sealed class SkippingTokenVisitor : IVisitor
+    private sealed class SkippingTokenVisitor : TokenVisitor
     {
-        public readonly List<string> Tokens = new();
         private readonly HashSet<int> _skip;
-        private readonly MemoryStream _pending = new();
-        private string? _kind;
-        private int _id;
-        private int _total;
 
         // Sequence nesting depth, and the depth of the skipped sequence whose
         // sub-tree we are currently dropping (-1 when not skipping a sub-tree).
@@ -323,15 +325,10 @@ public class TestVectorsConformanceTests
 
         private bool Skipping => _skipStartDepth >= 0;
 
-        public void Unsigned(int id, ulong v) { if (!Drop(id)) Tokens.Add($"u:{id}={v}"); }
-        public void Signed(int id, long v) { if (!Drop(id)) Tokens.Add($"s:{id}={v}"); }
-        public void Fp32(int id, float v) { if (!Drop(id)) Tokens.Add($"f32:{id}={BitConverter.SingleToInt32Bits(v)}"); }
-        public void Fp64(int id, double v) { if (!Drop(id)) Tokens.Add($"f64:{id}={BitConverter.DoubleToInt64Bits(v)}"); }
-        public void String(int id, int total, int offset, byte[] d, int o, int l) { if (!Drop(id)) Chunk("str", id, total, d, o, l); }
-        public void Blob(int id, int total, int offset, byte[] d, int o, int l) { if (!Drop(id)) Chunk("blob", id, total, d, o, l); }
-        public void ArrayBegin(int id, ArrayKind kind, int count) { if (!Drop(id)) Tokens.Add($"arr:{id}:{kind}:{count}"); }
+        /// <summary>True if the current field/element must be dropped.</summary>
+        protected override bool Drop(int id) => Skipping || _skip.Contains(id);
 
-        public void SequenceBegin(int id)
+        public override void SequenceBegin(int id)
         {
             if (Skipping)
             {
@@ -344,11 +341,11 @@ public class TestVectorsConformanceTests
                 _depth++;
                 return;
             }
-            Tokens.Add($"seq{{:{id}");
+            base.SequenceBegin(id);
             _depth++;
         }
 
-        public void SequenceEnd()
+        public override void SequenceEnd()
         {
             _depth--;
             if (Skipping)
@@ -359,27 +356,7 @@ public class TestVectorsConformanceTests
                 }
                 return;
             }
-            Tokens.Add("seq}");
-        }
-
-        /// <summary>True if the current field/element must be dropped.</summary>
-        private bool Drop(int id) => Skipping || _skip.Contains(id);
-
-        private void Chunk(string kind, int id, int total, byte[] d, int o, int l)
-        {
-            if (_kind == null)
-            {
-                _kind = kind;
-                _id = id;
-                _total = total;
-                _pending.SetLength(0);
-            }
-            _pending.Write(d, o, l);
-            if (_pending.Length >= _total)
-            {
-                Tokens.Add($"{_kind}:{_id}={Hex(_pending.ToArray())}");
-                _kind = null;
-            }
+            base.SequenceEnd();
         }
     }
 

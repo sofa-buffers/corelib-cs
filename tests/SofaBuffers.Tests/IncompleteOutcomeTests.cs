@@ -8,21 +8,12 @@
 
 using Xunit;
 using SofaBuffers.Tests.Common;
+using static SofaBuffers.Tests.Common.TestBytes;
 
 namespace SofaBuffers.Tests;
 
 public class IncompleteOutcomeTests
 {
-    private static byte[] Bytes(params int[] values)
-    {
-        var outp = new byte[values.Length];
-        for (int i = 0; i < values.Length; i++)
-        {
-            outp[i] = (byte)values[i];
-        }
-        return outp;
-    }
-
     // --- the three focused outcomes -----------------------------------------
 
     [Fact]

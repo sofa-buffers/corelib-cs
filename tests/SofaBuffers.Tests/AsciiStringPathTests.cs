@@ -17,6 +17,7 @@ using System;
 using System.Collections.Generic;
 using System.Text;
 using Xunit;
+using static SofaBuffers.Tests.Common.TestBytes;
 
 namespace SofaBuffers.Tests;
 
@@ -53,16 +54,6 @@ public class AsciiStringPathTests
             v >>= 7;
         }
         into.Add((byte)v);
-    }
-
-    private static byte[] Encode(int bufferSize, Action<OStream> body)
-    {
-        var buf = new byte[bufferSize];
-        var os = new OStream(buf);
-        body(os);
-        var wire = new byte[os.BytesUsed];
-        Array.Copy(buf, wire, wire.Length);
-        return wire;
     }
 
     public static IEnumerable<object[]> Strings()

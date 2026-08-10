@@ -15,6 +15,7 @@
 using System;
 using System.Collections.Generic;
 using Xunit;
+using static SofaBuffers.Tests.Common.TestBytes;
 
 namespace SofaBuffers.Tests;
 
@@ -44,16 +45,6 @@ public class VarintWidthTests
         public void Unsigned(int id, ulong value) => Unsigneds.Add((id, value));
 
         public void Signed(int id, long value) => Signeds.Add((id, value));
-    }
-
-    private static byte[] Encode(Action<OStream> body)
-    {
-        var buf = new byte[64];
-        var os = new OStream(buf);
-        body(os);
-        var wire = new byte[os.BytesUsed];
-        Array.Copy(buf, wire, wire.Length);
-        return wire;
     }
 
     [Theory]
