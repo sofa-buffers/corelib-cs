@@ -407,18 +407,16 @@ public sealed class IStream
         // inline a helper that itself contains a call, so every varint read went
         // through a real call. See ReadVarintMulti's remarks.
         ref byte origin = ref MemoryMarshal.GetArrayDataReference(data);
-        ulong header;
-        int n;
-        if (end - start >= MaxVarintBytes)
+        ref byte h0 = ref Unsafe.Add(ref origin, (nint)(uint)start);
+        ulong header = h0;
+        int n = 1;
+        if (header >= 0x80)
         {
-            ref byte h0 = ref Unsafe.Add(ref origin, (nint)(uint)start);
-            header = h0;
-            n = header < 0x80 ? 1 : ReadVarintMulti(ref h0, header, out header);
-        }
-        else
-        {
-            n = ReadVarintChecked(data, start, end, out header);
-            if (n == 0)
+            if (end - start >= MaxVarintBytes)
+            {
+                n = ReadVarintMulti(ref h0, header, out header);
+            }
+            else if ((n = ReadVarintChecked(data, start, end, out header)) == 0)
             {
                 return 0;
             }
@@ -437,18 +435,20 @@ public sealed class IStream
         {
             case T_VARINT_UNSIGNED:
             {
-                ulong value;
-                int m;
-                if (end - p >= MaxVarintBytes)
+                if (p >= end)
                 {
-                    ref byte v0 = ref Unsafe.Add(ref origin, (nint)(uint)p);
-                    value = v0;
-                    m = value < 0x80 ? 1 : ReadVarintMulti(ref v0, value, out value);
+                    return 0;
                 }
-                else
+                ref byte v0 = ref Unsafe.Add(ref origin, (nint)(uint)p);
+                ulong value = v0;
+                int m = 1;
+                if (value >= 0x80)
                 {
-                    m = ReadVarintChecked(data, p, end, out value);
-                    if (m == 0)
+                    if (end - p >= MaxVarintBytes)
+                    {
+                        m = ReadVarintMulti(ref v0, value, out value);
+                    }
+                    else if ((m = ReadVarintChecked(data, p, end, out value)) == 0)
                     {
                         return 0;
                     }
@@ -458,18 +458,20 @@ public sealed class IStream
             }
             case T_VARINT_SIGNED:
             {
-                ulong value;
-                int m;
-                if (end - p >= MaxVarintBytes)
+                if (p >= end)
                 {
-                    ref byte v0 = ref Unsafe.Add(ref origin, (nint)(uint)p);
-                    value = v0;
-                    m = value < 0x80 ? 1 : ReadVarintMulti(ref v0, value, out value);
+                    return 0;
                 }
-                else
+                ref byte v0 = ref Unsafe.Add(ref origin, (nint)(uint)p);
+                ulong value = v0;
+                int m = 1;
+                if (value >= 0x80)
                 {
-                    m = ReadVarintChecked(data, p, end, out value);
-                    if (m == 0)
+                    if (end - p >= MaxVarintBytes)
+                    {
+                        m = ReadVarintMulti(ref v0, value, out value);
+                    }
+                    else if ((m = ReadVarintChecked(data, p, end, out value)) == 0)
                     {
                         return 0;
                     }
@@ -509,18 +511,20 @@ public sealed class IStream
     /// <summary>Fast-path decode of a single fixlen field (fp32/fp64/string/blob).</summary>
     private int FastFixlen(byte[] data, int start, int p, int end, int id, IVisitor visitor)
     {
-        ulong lenHeader;
-        int n;
-        if (end - p >= MaxVarintBytes)
+        if (p >= end)
         {
-            ref byte w0 = ref Unsafe.Add(ref MemoryMarshal.GetArrayDataReference(data), (nint)(uint)p);
-            lenHeader = w0;
-            n = lenHeader < 0x80 ? 1 : ReadVarintMulti(ref w0, lenHeader, out lenHeader);
+            return 0;
         }
-        else
+        ref byte w0 = ref Unsafe.Add(ref MemoryMarshal.GetArrayDataReference(data), (nint)(uint)p);
+        ulong lenHeader = w0;
+        int n = 1;
+        if (lenHeader >= 0x80)
         {
-            n = ReadVarintChecked(data, p, end, out lenHeader);
-            if (n == 0)
+            if (end - p >= MaxVarintBytes)
+            {
+                n = ReadVarintMulti(ref w0, lenHeader, out lenHeader);
+            }
+            else if ((n = ReadVarintChecked(data, p, end, out lenHeader)) == 0)
             {
                 return 0;
             }
@@ -615,17 +619,23 @@ public sealed class IStream
     /// <summary>Fast-path decode of a whole varint array (unsigned or signed).</summary>
     private int FastVarintArray(byte[] data, int start, int p, int end, int id, ArrayKind kind, bool signed, IVisitor visitor)
     {
-        ulong count;
-        int n;
-        if (end - p >= MaxVarintBytes)
+        if (p >= end)
         {
-            ref byte c0 = ref Unsafe.Add(ref MemoryMarshal.GetArrayDataReference(data), (nint)(uint)p);
-            count = c0;
-            n = count < 0x80 ? 1 : ReadVarintMulti(ref c0, count, out count);
+            return 0;
         }
-        else if ((n = ReadVarintChecked(data, p, end, out count)) == 0)
+        ref byte c0 = ref Unsafe.Add(ref MemoryMarshal.GetArrayDataReference(data), (nint)(uint)p);
+        ulong count = c0;
+        int n = 1;
+        if (count >= 0x80)
         {
-            return 0; // count varint not complete; re-parse from header later
+            if (end - p >= MaxVarintBytes)
+            {
+                n = ReadVarintMulti(ref c0, count, out count);
+            }
+            else if ((n = ReadVarintChecked(data, p, end, out count)) == 0)
+            {
+                return 0; // count varint not complete; re-parse from header later
+            }
         }
         if (count > ARRAY_MAX)
         {
@@ -740,17 +750,23 @@ public sealed class IStream
     /// </remarks>
     private int FastFixlenArray(byte[] data, int start, int p, int end, int id, IVisitor visitor)
     {
-        ulong count;
-        int n;
-        if (end - p >= MaxVarintBytes)
-        {
-            ref byte c0 = ref Unsafe.Add(ref MemoryMarshal.GetArrayDataReference(data), (nint)(uint)p);
-            count = c0;
-            n = count < 0x80 ? 1 : ReadVarintMulti(ref c0, count, out count);
-        }
-        else if ((n = ReadVarintChecked(data, p, end, out count)) == 0)
+        if (p >= end)
         {
             return 0;
+        }
+        ref byte c0 = ref Unsafe.Add(ref MemoryMarshal.GetArrayDataReference(data), (nint)(uint)p);
+        ulong count = c0;
+        int n = 1;
+        if (count >= 0x80)
+        {
+            if (end - p >= MaxVarintBytes)
+            {
+                n = ReadVarintMulti(ref c0, count, out count);
+            }
+            else if ((n = ReadVarintChecked(data, p, end, out count)) == 0)
+            {
+                return 0;
+            }
         }
         if (count > ARRAY_MAX)
         {
@@ -765,7 +781,20 @@ public sealed class IStream
         // ArrayBegin deliberately has NOT fired yet — §4.8 fixes the order as
         // count word, format ceiling, fixlen_word, then the hook, so the receiver
         // learns the element subtype (fp32 vs fp64) before it judges the field.
-        int hn = ReadVarint(data, p, end, out ulong lenHeader);
+        ulong lenHeader = 0;
+        int hn = 0;
+        if (p < end)
+        {
+            ref byte f0 = ref Unsafe.Add(ref MemoryMarshal.GetArrayDataReference(data), (nint)(uint)p);
+            lenHeader = f0;
+            hn = 1;
+            if (lenHeader >= 0x80)
+            {
+                hn = end - p >= MaxVarintBytes
+                    ? ReadVarintMulti(ref f0, lenHeader, out lenHeader)
+                    : ReadVarintChecked(data, p, end, out lenHeader);
+            }
+        }
         if (hn == 0)
         {
             // Header split across the Feed boundary: resume reading it in the
@@ -861,58 +890,6 @@ public sealed class IStream
             remaining--;
         }
         return p - start;
-    }
-
-    /// <summary>
-    /// Read a base-128 varint from <c>data[pos..end)</c>.
-    /// </summary>
-    /// <returns>
-    /// The number of bytes consumed (&gt; 0) with the value in <paramref name="value"/>;
-    /// or <c>0</c> if the varint is not fully present in the buffer.
-    /// </returns>
-    /// <exception cref="SofabException">on varint overflow (&gt; <see cref="VALUE_BITS"/> bits).</exception>
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static int ReadVarint(byte[] data, int pos, int end, out ulong value)
-    {
-        if (end - pos >= MaxVarintBytes)
-        {
-            return ReadVarintUnchecked(ref MemoryMarshal.GetArrayDataReference(data), pos, out value);
-        }
-        return ReadVarintChecked(data, pos, end, out value);
-    }
-
-    /// <summary>
-    /// Decode a varint at <paramref name="pos"/> knowing the buffer holds at least
-    /// <see cref="MaxVarintBytes"/> bytes there, so neither an end check nor an
-    /// array bounds check is needed per byte.
-    /// </summary>
-    /// <remarks>
-    /// Fully unrolled rather than looped: the shift is then an immediate and there
-    /// is no shift counter to maintain or test, which is what makes the
-    /// single-byte case (every small field header and small scalar — the common
-    /// case by design, CORELIB_PLAN §1) two instructions and each further byte
-    /// about four.
-    /// <para>
-    /// The 64-bit bound (§4.1) is enforced where it can actually be violated — the
-    /// tenth byte — instead of on every byte: bytes 1..9 carry 63 payload bits and
-    /// can never overflow, and on the tenth only bit 0 fits, so any value above
-    /// <c>1</c> either spills past bit 63 or continues into an 11th byte. Both are
-    /// the <c>INVALID</c> outcome, and one comparison rejects both.
-    /// </para>
-    /// </remarks>
-    /// <returns>the number of bytes consumed (1..<see cref="MaxVarintBytes"/>)</returns>
-    /// <exception cref="SofabException">on varint overflow (&gt; <see cref="VALUE_BITS"/> bits).</exception>
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static int ReadVarintUnchecked(ref byte data, int pos, out ulong value)
-    {
-        ref byte b = ref Unsafe.Add(ref data, (nint)(uint)pos);
-        ulong v = b;
-        if (v < 0x80)
-        {
-            value = v;
-            return 1;
-        }
-        return ReadVarintMulti(ref b, v, out value);
     }
 
     /// <summary>
@@ -1017,7 +994,7 @@ public sealed class IStream
     /// complete in them.
     /// </summary>
     /// <remarks>
-    /// Both callers reach this only with fewer than <see cref="MaxVarintBytes"/>
+    /// Every caller reaches this only with fewer than <see cref="MaxVarintBytes"/>
     /// bytes left, so at most nine can be consumed — and nine bytes carry 63
     /// payload bits, one short of the 64-bit bound (§4.1). Only a tenth byte can
     /// break that bound and by construction it is not in this buffer: such a

@@ -355,28 +355,33 @@ public sealed class OStream
 
     /// <summary>Append a value as a base-128 LEB128 varint (7 bits per byte, low bytes first).</summary>
     /// <remarks>
-    /// Fast path: a varint is at most 10 bytes. When that much room is
-    /// guaranteed, advance a local cursor over the buffer with no per-byte
-    /// bounds or flush check; single-byte values (field headers, small scalars)
-    /// are by far the most common and skip the loop entirely.
+    /// Each width is held to the room it actually needs. A single-byte value —
+    /// every small field header and small scalar, the case the format is
+    /// designed around (CORELIB_PLAN §1) — needs one byte, so it stays on the
+    /// in-place path right up to the last byte of the buffer; holding it to the
+    /// wide <see cref="MaxVarintBytes"/> check instead would push every field of
+    /// a message encoded into an exactly-sized buffer (what the generator's
+    /// one-shot <c>Encode()</c> allocates) onto the byte-at-a-time path. A longer
+    /// value goes to <see cref="WriteVarintAtMulti"/>, which assembles the whole
+    /// encoding in a register and therefore does need the full headroom;
+    /// anything that does not fit falls to <see cref="WriteVarintSlow"/>.
     /// </remarks>
     /// <param name="value">the unsigned value to encode</param>
     private void WriteVarint(ulong value)
     {
         int p = _offset;
-        if (_end - p >= MaxVarintBytes)
+        if (value < 0x80)
         {
-            ref byte b = ref MemoryMarshal.GetArrayDataReference(_buffer);
-            if (value < 0x80)
+            if (p < _end)
             {
-                Unsafe.Add(ref b, (nint)(uint)p) = (byte)value;
-                p++;
+                Unsafe.Add(ref MemoryMarshal.GetArrayDataReference(_buffer), (nint)(uint)p) = (byte)value;
+                _offset = p + 1;
+                return;
             }
-            else
-            {
-                p = WriteVarintAtMulti(ref b, p, value);
-            }
-            _offset = p;
+        }
+        else if (_end - p >= MaxVarintBytes)
+        {
+            _offset = WriteVarintAtMulti(ref MemoryMarshal.GetArrayDataReference(_buffer), p, value);
             return;
         }
         WriteVarintSlow(value);
@@ -475,20 +480,45 @@ public sealed class OStream
     }
 
     /// <summary>Buffer-spanning varint write: flushes mid-value when the buffer is tiny.</summary>
+    /// <remarks>
+    /// Encodes as many bytes as the room left holds before testing anything, so
+    /// a varint that does fit in a nearly-full buffer costs one capacity test
+    /// rather than one per byte plus a call. Only a varint that genuinely
+    /// straddles the buffer end comes back for a flush — the case
+    /// <c>MIN_OUTPUT_BUFFER == 1</c> exists for (CORELIB_PLAN §5.1).
+    /// </remarks>
     /// <param name="value">the unsigned value to encode</param>
     private void WriteVarintSlow(ulong value)
     {
-        do
+        while (true)
         {
-            int b = (int)(value & 0x7F);
-            value >>= 7;
-            if (value != 0)
+            int p = _offset;
+            int room = _end - p;
+            if (room > 0)
             {
-                b |= 0x80;
+                ref byte b = ref MemoryMarshal.GetArrayDataReference(_buffer);
+                do
+                {
+                    ulong next = value >> 7;
+                    if (next == 0)
+                    {
+                        Unsafe.Add(ref b, (nint)(uint)p) = (byte)value;
+                        _offset = p + 1;
+                        return;
+                    }
+                    Unsafe.Add(ref b, (nint)(uint)p) = (byte)(value | 0x80);
+                    p++;
+                    value = next;
+                }
+                while (--room > 0);
+                _offset = p;
             }
-            PushByte(b);
+            if (_sink == null)
+            {
+                throw new SofabException(SofabError.BufferFull);
+            }
+            FlushPending();
         }
-        while (value != 0);
     }
 
     /// <summary>
@@ -688,7 +718,7 @@ public sealed class OStream
             CommitPending();
         }
         ulong header = ((ulong)(uint)id << 3) | T_FIXLEN;
-        ulong word = ((ulong)(uint)length << 3) | (uint)subtype.Raw();
+        ulong word = ((ulong)(uint)length << 3) | (uint)subtype;
         int p = _offset;
         if (_end - p >= 2 * MaxVarintBytes)
         {
@@ -757,7 +787,7 @@ public sealed class OStream
             return;
         }
         WriteVarint(header);
-        WriteVarint((4UL << 3) | (uint)FixlenType.Fp32.Raw());
+        WriteVarint((4UL << 3) | (uint)FixlenType.Fp32);
         PutLe32(bits);
     }
 
@@ -829,7 +859,7 @@ public sealed class OStream
             return;
         }
         WriteVarint(header);
-        WriteVarint((8UL << 3) | (uint)FixlenType.Fp64.Raw());
+        WriteVarint((8UL << 3) | (uint)FixlenType.Fp64);
         PutLe64(bits);
     }
 
@@ -892,7 +922,7 @@ public sealed class OStream
                 {
                     p = WriteVarintAtMulti(ref b, p, header);
                 }
-                ulong word = ((ulong)(uint)len << 3) | (uint)FixlenType.String.Raw();
+                ulong word = ((ulong)(uint)len << 3) | (uint)FixlenType.String;
                 if (word < 0x80)
                 {
                     Unsafe.Add(ref b, (nint)(uint)p) = (byte)word;
@@ -913,6 +943,25 @@ public sealed class OStream
             }
         }
 
+        WriteStringTranscoded(id, text);
+    }
+
+    /// <summary>
+    /// The transcoding path for a string the ASCII fast path did not take: not
+    /// all-ASCII, longer than <see cref="AsciiFastPathMaxChars"/>, or with too
+    /// little room left to write it in place.
+    /// </summary>
+    /// <remarks>
+    /// Split out of <see cref="WriteString"/> so the fast path carries no
+    /// exception-handling region: a method containing one is compiled with a
+    /// full frame and keeps locals on the stack across it, which every short
+    /// ASCII value would otherwise pay for.
+    /// </remarks>
+    /// <param name="id">field id</param>
+    /// <param name="text">string value (must be encodable as valid UTF-8)</param>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private void WriteStringTranscoded(int id, string text)
+    {
         int n;
         try
         {
@@ -923,7 +972,7 @@ public sealed class OStream
             throw new SofabException(SofabError.Argument, "invalid UTF-8 string: " + e.Message);
         }
         WriteIdType(id, T_FIXLEN);
-        WriteVarint(((ulong)n << 3) | (uint)FixlenType.String.Raw());
+        WriteVarint(((ulong)n << 3) | (uint)FixlenType.String);
         if (_end - _offset >= n)
         {
             _offset += StrictUtf8.GetBytes(text, 0, text.Length, _buffer, _offset);
@@ -1531,7 +1580,7 @@ public sealed class OStream
         WriteVarint((uint)data.Length);
         // A fixlen array always carries its fixlen_word, even when empty (§4.8),
         // so an empty fp32 array is distinguishable from an empty fp64 array.
-        WriteVarint((4UL << 3) | (uint)FixlenType.Fp32.Raw());
+        WriteVarint((4UL << 3) | (uint)FixlenType.Fp32);
         int p = _offset;
         if ((long)(_end - p) >= (long)data.Length * 4)
         {
@@ -1565,7 +1614,7 @@ public sealed class OStream
         WriteVarint((uint)data.Length);
         // A fixlen array always carries its fixlen_word, even when empty (§4.8),
         // so an empty fp64 array is distinguishable from an empty fp32 array.
-        WriteVarint((8UL << 3) | (uint)FixlenType.Fp64.Raw());
+        WriteVarint((8UL << 3) | (uint)FixlenType.Fp64);
         int p = _offset;
         if ((long)(_end - p) >= (long)data.Length * 8)
         {
