@@ -27,7 +27,10 @@ namespace sofab;
 /// <see cref="SofabError.BufferFull"/>.
 /// <para>
 /// An initial <c>offset</c> reserves space at the front of the buffer for a
-/// lower-layer protocol header, avoiding a copy.
+/// lower-layer protocol header, avoiding a copy. A sink that takes the buffer it
+/// is handed installs a replacement with <see cref="BufferSet"/> and gets that
+/// reservation again — the offset belongs to the installation, not to the buffer
+/// (CORELIB_PLAN §5.1).
 /// </para>
 /// <para>
 /// <b>Hot-path convention.</b> The single-byte varint case — every small field
@@ -198,8 +201,7 @@ public sealed class OStream
         int used = _offset;
         if (used > 0 && _sink != null)
         {
-            _sink(_buffer, 0, used);
-            _offset = 0;
+            FlushPending();
         }
         return used;
     }
@@ -208,6 +210,14 @@ public sealed class OStream
     /// Replace the active buffer (typically from within a flush sink), resuming
     /// writes at <paramref name="offset"/> in the new buffer.
     /// </summary>
+    /// <remarks>
+    /// The start offset belongs to the installation, not to the buffer
+    /// (CORELIB_PLAN §5.1): the cursor starts at <paramref name="offset"/> and
+    /// the offset is consumed there, so a later flush the sink returns from
+    /// without installing anything resumes at 0. Handing the <i>same</i> buffer
+    /// back is an installation like any other, which is how a sink re-arms its
+    /// framing-header reservation for every flushed packet.
+    /// </remarks>
     /// <param name="buffer">new caller-owned output buffer (length &gt; 0)</param>
     /// <param name="offset">initial write position (<c>0..buffer.Length</c>)</param>
     public void BufferSet(byte[] buffer, int offset)
@@ -229,8 +239,8 @@ public sealed class OStream
 
     /// <summary>
     /// Append one byte to the active buffer. When the buffer is full, flush it to
-    /// the sink and resume at the start; with no sink this raises
-    /// <see cref="SofabError.BufferFull"/>.
+    /// the sink and resume where the returning callback left the cursor; with no
+    /// sink this raises <see cref="SofabError.BufferFull"/>.
     /// </summary>
     /// <param name="b">byte value (low 8 bits used)</param>
     private void PushByte(int b)
@@ -241,10 +251,28 @@ public sealed class OStream
             {
                 throw new SofabException(SofabError.BufferFull);
             }
-            _sink(_buffer, 0, _offset);
-            _offset = 0;
+            FlushPending();
         }
         _buffer[_offset++] = (byte)b;
+    }
+
+    /// <summary>
+    /// Hand the pending bytes to the sink (which must be set) and leave the cursor
+    /// where the returning callback wants writing to resume.
+    /// </summary>
+    /// <remarks>
+    /// CORELIB_PLAN §5.1: the cursor is dropped to 0 <i>before</i> the callback
+    /// runs, so a sink that copies and returns resumes at the start of the still
+    /// active buffer, while a sink that takes the buffer and installs a
+    /// replacement with <see cref="BufferSet"/> keeps that installation's start
+    /// offset — its reserved header room survives the flush that created it.
+    /// Zeroing after the callback instead would silently discard the reservation.
+    /// </remarks>
+    private void FlushPending()
+    {
+        int used = _offset;
+        _offset = 0;
+        _sink!(_buffer, 0, used);
     }
 
     /// <summary>Append <paramref name="len"/> raw bytes from <paramref name="data"/>, flushing as needed.</summary>
@@ -267,8 +295,7 @@ public sealed class OStream
                 {
                     throw new SofabException(SofabError.BufferFull);
                 }
-                _sink(_buffer, 0, _offset);
-                _offset = 0;
+                FlushPending();
             }
             int n = Math.Min(_end - _offset, remaining);
             Array.Copy(data, src, _buffer, _offset, n);

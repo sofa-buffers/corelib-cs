@@ -97,6 +97,26 @@ for (int i = 0; i < 1000; i++)
 os.Flush();                                    // push the tail
 ```
 
+A sink that only *copies* the bytes — as `Stream.Write` does — returns without
+doing anything else, and the encoder resumes at offset 0 of the same array. A
+zero-copy sink instead **takes** the buffer (hands it to a transport, queues it
+for an asynchronous write) and must install a replacement before it returns, with
+`BufferSet(buffer, offset)`. The start offset belongs to that installation, not to
+the buffer, so a sink can reserve framing-header room in *every* packet —
+installing the same array again re-arms the reservation:
+
+```csharp
+byte[] a = new byte[512], b = new byte[512];   // two packet buffers
+OStream os = null!;
+FlushSink sink = (data, offset, length) =>
+{
+    Stamp(data, length);                       // fill the 3 reserved header bytes
+    transport.Send(data, length);              // takes ownership of `data`
+    os.BufferSet(ReferenceEquals(data, a) ? b : a, 3);  // reserve the next header
+};
+os = new OStream(a, 3, sink);                  // first packet's header room
+```
+
 ### Nested sequences
 
 A sequence (a nested struct/union, or an array of variable-size elements) is
@@ -266,7 +286,12 @@ of the bytes stays with the caller.
   write throws `SofabError.BufferFull`. With a `FlushSink`, the full buffer is handed
   to the sink and writing resumes at the *start* of the same array (so a message can
   exceed the buffer, even RAM). The sink's array is the encoder's live buffer,
-  reused after the call returns, so a sink that retains bytes must copy them.
+  reused after the call returns, so a sink that retains bytes must copy them —
+  unless it **takes** the buffer, in which case it must install a replacement with
+  `BufferSet(buffer, offset)` before returning; the encoder then resumes at *that
+  call's* offset (reserved header room and all) instead of at 0. The offset is
+  consumed by the flush it was installed in: a later flush the sink returns from
+  without installing anything resumes at 0 again (CORELIB_PLAN §5.1).
 - **Decode (`IStream` + `IVisitor`).** The `byte[]` you `Feed` is aliased, not
   copied: `String` / `Blob` chunks point directly into it (`data[chunkOffset ..
   chunkOffset+chunkLength)`) and are valid only for the duration of the callback.
