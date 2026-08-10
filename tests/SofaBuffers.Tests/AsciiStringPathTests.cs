@@ -2,12 +2,12 @@
  * SofaBuffers C# - WriteString path coverage.
  *
  * WriteString transcodes a short all-ASCII string itself and defers everything
- * else to the runtime's UTF-8 encoder. The fast path writes the header, the
- * length word and the payload before it can know the string is ASCII throughout,
- * and abandons all of it — without advancing the write position — the moment it
- * meets a non-ASCII char. These tests pin that hand-off down: the two paths must
- * produce identical bytes, an abandoned attempt must leave no trace in the
- * output, and neither the length boundary nor a buffer too small for the fast
+ * else to the runtime's UTF-8 encoder. Which path applies is decided BEFORE
+ * anything is committed — held-back sequence headers included — so a string that
+ * turns out to be unencodable (§6.4) leaves the stream exactly as it found it.
+ * These tests pin that hand-off down: the two paths must produce identical bytes,
+ * an abandoned attempt must leave no trace in the output, a refusal must be
+ * atomic, and neither the length boundary nor a buffer too small for the fast
  * path may change what is encoded.
  *
  * SPDX-License-Identifier: MIT
@@ -139,8 +139,8 @@ public class AsciiStringPathTests
     [MemberData(nameof(Strings))]
     public void AStringInsideALazySequenceStillFramesIt(string text)
     {
-        // The fast path commits the held-back sequence headers before it writes,
-        // so an abandoned attempt must not frame the sequence twice.
+        // Taking the fast path commits the held-back sequence headers, so an
+        // abandoned attempt must not frame the sequence twice.
         byte[] wire = Encode(4096, os =>
         {
             os.WriteSequenceBeginLazy(3);
@@ -152,5 +152,116 @@ public class AsciiStringPathTests
         expected.AddRange(Expected(6, text));
         expected.Add(0x07);                                    // sequence end
         Assert.Equal(expected.ToArray(), wire);
+    }
+
+    /// <summary>
+    /// Strings §6.4 refuses, at and around the ASCII fast path's length bound.
+    /// Passed around in-process, never as xunit theory data: serializing a theory
+    /// argument round-trips it through UTF-8 and would replace the very unpaired
+    /// surrogate under test with U+FFFD, leaving a perfectly encodable string.
+    /// </summary>
+    private static IEnumerable<string> Unencodable()
+    {
+        yield return "\ud800";                        // lone high surrogate
+        yield return "a\ud800b";                      // interior, 3 chars
+        yield return "abc\udfff";                     // lone low surrogate, last
+        yield return new string('a', 95) + "\ud800";  // exactly at the fast-path bound
+        yield return new string('a', 96) + "\ud800";  // one past it
+        yield return new string('a', 200) + "\ud800"; // general path
+        yield return "é\ud800";                       // non-ASCII and unpaired
+    }
+
+    [Fact]
+    public void ARefusedStringWritesNothing()
+    {
+        // CORELIB_PLAN §6.4: a string that cannot be encoded as valid UTF-8 is
+        // refused with Argument. The refusal is atomic — the stream must be
+        // byte-for-byte what it was before the call, whichever path would have
+        // handled the value.
+        foreach (string text in Unencodable())
+        {
+            var buf = new byte[4096];
+            var os = new OStream(buf);
+            os.WriteUnsigned(1, 300);
+            int before = os.BytesUsed;
+
+            var ex = Assert.Throws<SofabException>(() => os.WriteString(6, text));
+            Assert.Equal(SofabError.Argument, ex.Error);
+            Assert.Equal(before, os.BytesUsed);
+
+            // ... and the stream stays usable: the next field lands where it belongs.
+            os.WriteUnsigned(2, 7);
+            Assert.Equal(new byte[] { 0x08, 0xAC, 0x02, 0x10, 0x07 }, Take(buf, os));
+        }
+    }
+
+    [Fact]
+    public void ARefusedStringLeavesAHeldBackSequenceUnframed()
+    {
+        // The refusal must not have committed the held-back header: recovering
+        // from it by skipping the field and closing the sequence leaves an
+        // all-default sequence OMITTED, as MESSAGE_SPEC §2 requires — not framed
+        // empty (26 07), which no other port emits for the same schema value.
+        foreach (string text in Unencodable())
+        {
+            var buf = new byte[4096];
+            var os = new OStream(buf);
+            os.WriteSequenceBeginLazy(4);
+
+            Assert.Throws<SofabException>(() => os.WriteString(1, text));
+            Assert.Equal(0, os.BytesUsed);
+
+            os.WriteSequenceEnd();
+            Assert.Equal(0, os.BytesUsed);
+            Assert.Equal(Array.Empty<byte>(), Take(buf, os));
+        }
+    }
+
+    [Fact]
+    public void ARefusedStringLeavesAnEnclosingSequenceIntact()
+    {
+        // Same, one level in and with content after the refusal: the held-back
+        // header is committed by the field that follows, exactly once.
+        foreach (string text in Unencodable())
+        {
+            byte[] wire = Encode(4096, os =>
+            {
+                os.WriteSequenceBeginLazy(4);
+                Assert.Throws<SofabException>(() => os.WriteString(1, text));
+                os.WriteUnsigned(2, 7);
+                os.WriteSequenceEnd();
+            });
+
+            Assert.Equal(new byte[] { 0x26, 0x10, 0x07, 0x07 }, wire);
+        }
+    }
+
+    [Fact]
+    public void AValidNonAsciiShortStringStillEncodesInsideALazySequence()
+    {
+        // The guard that decides the path must not change what a *valid* short
+        // non-ASCII string encodes to, nor when the held-back header commits.
+        foreach (string text in new[] { "é", "grüße", "日本語", "😀", "a\0é" })
+        {
+            byte[] wire = Encode(4096, os =>
+            {
+                os.WriteSequenceBeginLazy(4);
+                os.WriteString(1, text);
+                os.WriteSequenceEnd();
+            });
+
+            var expected = new List<byte> { 0x26 };            // id 4, sequence start
+            expected.AddRange(Expected(1, text));
+            expected.Add(0x07);                                // sequence end
+            Assert.Equal(expected.ToArray(), wire);
+        }
+    }
+
+    /// <summary>Snapshot of everything written so far.</summary>
+    private static byte[] Take(byte[] buffer, OStream os)
+    {
+        byte[] wire = new byte[os.BytesUsed];
+        Array.Copy(buffer, wire, wire.Length);
+        return wire;
     }
 }

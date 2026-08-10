@@ -341,6 +341,10 @@ targets are always strict").
   silently substitutes `U+FFFD` the way the default `Encoding.UTF8` does; silent
   replacement is a data mutation the spec forbids. Valid strings (including
   embedded `U+0000`) encode to exactly the same bytes as before.
+  The refusal is **atomic at every length**: it neither advances `BytesUsed` nor
+  commits a header held back by `WriteSequenceBeginLazy`, so catching it and
+  closing the sequence still lets an otherwise-empty sequence vanish
+  (MESSAGE_SPEC §2) instead of framing an empty `26 07`.
 - **Decode.** The decoder hands the raw string bytes to your visitor without
   transcoding; generated code materializes the `string` with a strict/fatal
   decoder, producing the `InvalidMessage` outcome on invalid UTF-8. Skipped
