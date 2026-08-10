@@ -318,6 +318,15 @@ of the bytes stays with the caller.
   call's* offset (reserved header room and all) instead of at 0. The offset is
   consumed by the flush it was installed in: a later flush the sink returns from
   without installing anything resumes at 0 again (CORELIB_PLAN §5.1).
+- **No payload-sized temporaries.** That "never allocates" holds for `string` too,
+  the one payload that has to be *transcoded* rather than copied: when the value is
+  longer than the room left in the buffer, `WriteString` transcodes it in pieces
+  straight into that room — carrying a split surrogate pair across the flush with a
+  stateful encoder — instead of materializing the UTF-8 bytes first. So the buffer,
+  not the message, bounds peak memory (CORELIB_PLAN §5.1: the payload run of a
+  `string` is *divisible* at any byte boundary): a 64 MB string streams through a
+  16-byte buffer in 16-byte pieces, and a `string` with no schema `maxlen` is not a
+  memory risk. Output bytes are identical either way.
 - **`Sofab.MinOutputBuffer` = 1 (`MIN_OUTPUT_BUFFER`, CORELIB_PLAN §5.1).** The
   smallest buffer accepted **for streaming**. This encoder splits every atomic unit
   across a flush, so one byte is enough: any message streams through a one-byte

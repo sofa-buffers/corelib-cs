@@ -127,7 +127,26 @@ public sealed class OStream
     /// </summary>
     private const int AsciiFastPathMaxChars = 96;
 
+    /// <summary>
+    /// Longest UTF-8 encoding of a single Unicode scalar value (4 bytes, for a
+    /// character written in C# as a surrogate pair). The chunked transcoder in
+    /// <see cref="PushTranscoded"/> never hands the runtime encoder a
+    /// destination smaller than this, because <c>Encoder.Convert</c> cannot emit
+    /// a partial rune.
+    /// </summary>
+    private const int MaxUtf8BytesPerRune = 4;
+
     private readonly FlushSink? _sink;
+
+    /// <summary>
+    /// Stateful UTF-8 encoder used by <see cref="PushTranscoded"/> to split a
+    /// string payload across flushes, created on first use and reused for the
+    /// life of this <see cref="OStream"/>. Its state (a pending high surrogate)
+    /// lives only within one <see cref="WriteString"/> call, which resets it
+    /// before use. <c>null</c> until a string actually spans the buffer, so the
+    /// common one-shot encode never pays for it.
+    /// </summary>
+    private Encoder? _utf8Encoder;
 
     /// <summary>
     /// Strict UTF-8 codec used for <see cref="WriteString"/>. Constructed with
@@ -910,10 +929,101 @@ public sealed class OStream
             _offset += StrictUtf8.GetBytes(text, 0, text.Length, _buffer, _offset);
             return;
         }
-        // Buffer-spanning write: fall back to a temp array streamed via PushRaw.
-        // GetByteCount above already validated, so GetBytes cannot throw here.
-        byte[] bytes = StrictUtf8.GetBytes(text);
-        PushRaw(bytes, 0, bytes.Length);
+        // Buffer-spanning write: transcode straight into the room the buffer has
+        // left, flush, and carry on — never into a payload-sized temporary.
+        PushTranscoded(text);
+    }
+
+    /// <summary>
+    /// Transcode <paramref name="text"/> into the output buffer in as many
+    /// pieces as the buffer's remaining room dictates, flushing in between.
+    /// </summary>
+    /// <remarks>
+    /// CORELIB_PLAN §5.1 makes the payload run of a <c>string</c> <i>divisible</i>
+    /// at any byte boundary, and states normatively that the output buffer bounds
+    /// memory, not the message: a field with no schema <c>maxlen</c> can exceed
+    /// any buffer. Materializing the transcoded payload in a temporary array —
+    /// the only way a <c>string</c> would differ from a <c>blob</c>, which streams
+    /// the caller's bytes — would hand that bound back to the message and put a
+    /// payload-sized gen0 allocation on the hot path, triggered by nothing more
+    /// than an unlucky buffer position.
+    /// <para>
+    /// A stateful <see cref="Encoder"/> is what makes the split legal: it carries
+    /// a surrogate pair whose halves land on either side of a chunk boundary, so
+    /// the pieces concatenate to exactly the one-shot bytes. It is created once
+    /// per <see cref="OStream"/> and reset per call, so repeated large strings
+    /// cost nothing after the first.
+    /// </para>
+    /// <para>
+    /// Two chunk sizes: while the buffer has room for a whole rune the encoder
+    /// writes in place, and once fewer than <see cref="MaxUtf8BytesPerRune"/>
+    /// bytes are left it transcodes one rune into a stack scratch and pushes it
+    /// byte-wise across the flush. That second path is what lets a UTF-8 sequence
+    /// itself straddle a flush, which <c>MIN_OUTPUT_BUFFER == 1</c> requires:
+    /// <see cref="Encoder"/>.<c>Convert</c> cannot emit a partial rune, so it is
+    /// never handed a destination too small to hold one.
+    /// </para>
+    /// <para>
+    /// The caller has already run <see cref="Encoding.GetByteCount(string)"/>
+    /// over the whole value — that is where the <c>fixlen_word</c> length comes
+    /// from — so the string is known encodable and the loop cannot fail partway
+    /// on an unpaired surrogate. It can still hit a full buffer with no sink,
+    /// which reports <see cref="SofabError.BufferFull"/> exactly like any other
+    /// oversized payload.
+    /// </para>
+    /// </remarks>
+    /// <param name="text">the (already validated) string value</param>
+    private void PushTranscoded(string text)
+    {
+        Encoder encoder = _utf8Encoder ??= StrictUtf8.GetEncoder();
+        encoder.Reset();
+
+        Span<byte> rune = stackalloc byte[MaxUtf8BytesPerRune];
+        int from = 0;
+        int charsLeft = text.Length;
+        while (charsLeft > 0)
+        {
+            if (_offset >= _end)
+            {
+                if (_sink == null)
+                {
+                    throw new SofabException(SofabError.BufferFull);
+                }
+                FlushPending();
+            }
+
+            int room = _end - _offset;
+            int charsUsed, bytesUsed;
+            if (room >= MaxUtf8BytesPerRune)
+            {
+                encoder.Convert(
+                    text.AsSpan(from, charsLeft),
+                    _buffer.AsSpan(_offset, room),
+                    flush: false,
+                    out charsUsed,
+                    out bytesUsed,
+                    out _);
+                _offset += bytesUsed;
+            }
+            else
+            {
+                // Tail too short for a whole rune: encode one into the scratch
+                // and let PushByte carry it over the flush boundary.
+                encoder.Convert(
+                    text.AsSpan(from, charsLeft),
+                    rune,
+                    flush: false,
+                    out charsUsed,
+                    out bytesUsed,
+                    out _);
+                for (int i = 0; i < bytesUsed; i++)
+                {
+                    PushByte(rune[i]);
+                }
+            }
+            from += charsUsed;
+            charsLeft -= charsUsed;
+        }
     }
 
     /// <summary>Write a binary blob field.</summary>
