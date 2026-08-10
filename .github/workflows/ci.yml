@@ -19,12 +19,19 @@ env:
 
 jobs:
   build-test:
-    name: Build & test (${{ matrix.tfm }})
+    name: Build & test (${{ matrix.tfm }}, ${{ matrix.configuration }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
+      # Debug is a matrix dimension, not an extra step, so all four legs report
+      # separately. It earns its place here: the `Unsafe.Add` /
+      # `MemoryMarshal.GetArrayDataReference` arithmetic in OStream/IStream is
+      # guarded only by the surrounding length checks, and Debug runs it without
+      # the Release JIT's optimizations — and it is the only leg that compiles
+      # `#if DEBUG` code and `Debug.Assert` arguments at all.
       matrix:
         tfm: [net9.0, net10.0]
+        configuration: [Debug, Release]
     steps:
       - uses: actions/checkout@v7
 
@@ -39,14 +46,26 @@ jobs:
             9.0.x
             10.0.x
 
+      # `setup-dotnet`'s built-in `cache: true` needs a lock file, and turning
+      # `RestorePackagesWithLockFile` on would add a generated packages.lock.json
+      # to every project and a restore that fails on any drift; caching the global
+      # package folder keyed on the .csproj files gets the same restore hit
+      # without putting generated files in the tree.
+      - name: Cache NuGet packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: nuget-${{ runner.os }}-${{ hashFiles('**/*.csproj') }}
+          restore-keys: nuget-${{ runner.os }}-
+
       - name: Restore
         run: dotnet restore SofaBuffers.sln
 
       - name: Build
-        run: dotnet build SofaBuffers.sln --no-restore -c Release -f ${{ matrix.tfm }}
+        run: dotnet build SofaBuffers.sln --no-restore -c ${{ matrix.configuration }} -f ${{ matrix.tfm }}
 
       - name: Test
-        run: dotnet test SofaBuffers.sln --no-build -c Release -f ${{ matrix.tfm }} --verbosity normal
+        run: dotnet test SofaBuffers.sln --no-build -c ${{ matrix.configuration }} -f ${{ matrix.tfm }} --verbosity normal
 
   coverage:
     name: Coverage
@@ -62,6 +81,14 @@ jobs:
           dotnet-version: |
             9.0.x
             10.0.x
+
+      # Same package cache as the build-and-test legs (see the note there).
+      - name: Cache NuGet packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: nuget-${{ runner.os }}-${{ hashFiles('**/*.csproj') }}
+          restore-keys: nuget-${{ runner.os }}-
 
       # Runs the xUnit suite and produces a Cobertura report (coverlet.collector),
       # scoped to the SofaBuffers library via coverlet.runsettings.
