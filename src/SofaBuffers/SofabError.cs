@@ -23,9 +23,17 @@ public enum SofabError
     BufferFull,
 
     /// <summary>
-    /// The input bytes are not a valid Sofab message (varint overflow, bad type
-    /// tag, zero-length array, dangling sequence end, ...).
+    /// The input bytes are not a valid Sofab message (varint overflow, a reserved
+    /// fixlen subtype, a count above <c>ARRAY_MAX</c>, nesting past
+    /// <c>MAX_DEPTH</c>, dangling sequence end, ...).
     /// </summary>
+    /// <remarks>
+    /// A zero-count array is <em>not</em> in that company: it is a normal
+    /// encoding — <c>[ header ][ count=0 ]</c> with no elements (CORELIB_PLAN
+    /// §4.7), plus the <c>fixlen_word</c> naming the element subtype for a fixlen
+    /// array (§4.8) — and decodes into a single
+    /// <see cref="IVisitor.ArrayBegin(int, ArrayKind, int)"/> with a count of 0.
+    /// </remarks>
     InvalidMessage,
 
     /// <summary>
