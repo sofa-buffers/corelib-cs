@@ -812,7 +812,9 @@ public sealed class OStream
         // intermediate byte[] per call: measure once (vectorized), then let the
         // runtime encoder write in place when the buffer has room. The strict
         // codec throws on an unpaired surrogate rather than emitting U+FFFD, so an
-        // invalid string is rejected up front — before any header is written.
+        // invalid string is rejected up front — before any header is written and
+        // before any held-back sequence header is committed (§6.4: the refusal
+        // leaves the stream exactly as it found it).
         if (text == null)
         {
             throw new ArgumentNullException(nameof(text));
@@ -821,27 +823,29 @@ public sealed class OStream
         // ASCII fast path. Every char below U+0080 encodes to itself as one byte,
         // so the payload length is known up front (the char count) and no
         // surrogate can be involved — the two facts the general path pays
-        // Encoding.GetByteCount and Encoding.GetBytes to establish. Nothing is
-        // committed until the whole string is confirmed ASCII: _offset only moves
-        // on success, so a non-ASCII char anywhere simply falls through below.
-        // Bounded by AsciiFastPathMaxChars because past that the runtime's
-        // vectorized transcoder wins over this scalar loop.
-        if (text.Length <= AsciiFastPathMaxChars)
+        // Encoding.GetByteCount and Encoding.GetBytes to establish. The
+        // ASCII-ness question is settled by a vectorized Ascii.IsValid BEFORE
+        // anything is committed, rather than discovered mid-transcode: committing
+        // the held-back sequence headers first and only then meeting a char that
+        // turns out to be an unpaired surrogate would leave the §6.4 refusal
+        // non-atomic, framing an empty sequence MESSAGE_SPEC §2 says must be
+        // omitted. Bounded by AsciiFastPathMaxChars because past that the
+        // runtime's general transcoder wins over this measure-free in-place copy.
+        if (text.Length <= AsciiFastPathMaxChars && Ascii.IsValid(text))
         {
             if (id < 0)
-        {
-            ThrowBadId(id);
-        }
-        if (_nPending != 0)
-        {
-            CommitPending();
-        }
+            {
+                ThrowBadId(id);
+            }
+            if (_nPending != 0)
+            {
+                CommitPending();
+            }
             int len = text.Length;
             int p = _offset;
             if (_end - p >= (2 * MaxVarintBytes) + len)
             {
                 ref byte b = ref MemoryMarshal.GetArrayDataReference(_buffer);
-                ref char src = ref MemoryMarshal.GetReference(text.AsSpan());
                 ulong header = ((ulong)(uint)id << 3) | T_FIXLEN;
                 if (header < 0x80)
                 {
@@ -862,22 +866,14 @@ public sealed class OStream
                 {
                     p = WriteVarintAtMulti(ref b, p, word);
                 }
-                ref byte dst = ref Unsafe.Add(ref b, (nint)(uint)p);
-                int i = 0;
-                for (; i < len; i++)
-                {
-                    char c = Unsafe.Add(ref src, i);
-                    if (c >= 0x80)
-                    {
-                        break;
-                    }
-                    Unsafe.Add(ref dst, i) = (byte)c;
-                }
-                if (i == len)
-                {
-                    _offset = p + len;
-                    return;
-                }
+                // Every char is known ASCII, so this narrows the whole string in
+                // one vectorized pass and cannot fail partway.
+                Ascii.FromUtf16(
+                    text,
+                    MemoryMarshal.CreateSpan(ref Unsafe.Add(ref b, (nint)(uint)p), len),
+                    out _);
+                _offset = p + len;
+                return;
             }
         }
 
