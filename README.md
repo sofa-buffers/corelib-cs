@@ -487,8 +487,9 @@ dotnet run -c Release --project bench/SofaBuffers.Bench -f net10.0 -- bench
 The managed runtime exposes no portable cycle counter, so `perf` reports CPU
 time/op (clock-independent) as the code-cost proxy alongside MB/s. Only the third
 tool is fully independent of the machine: `bench/run_callgrind.sh` counts
-instructions retired per operation under Callgrind (it needs `valgrind`, builds
-the project itself, and runs it directly on the built assembly):
+instructions retired per operation under Callgrind (it needs `valgrind` on the
+`PATH` — `apt-get install valgrind`, and the `.devcontainer/` image ships it —
+builds the project itself, and runs it directly on the built assembly):
 
 ```bash
 bash bench/run_callgrind.sh
