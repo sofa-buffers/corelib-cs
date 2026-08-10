@@ -78,6 +78,15 @@ os.WriteString(3, "hi");
 int used = os.BytesUsed;        // bytes written to the buffer
 ```
 
+`WriteFp32` / `WriteFp64` / `WriteString` / `WriteBlob` cover every fixed-length
+field a schema can produce. The raw escape hatch `WriteFixlen(id, data, from,
+length, subtype)` writes one directly, and holds the caller to what the wire
+allows (CORELIB_PLAN §4.6): `subtype` must be one of the four defined tags —
+`0x4`–`0x7` are reserved — and `Fp32` / `Fp64` must declare exactly 4 / 8 payload
+bytes. Anything else is a malformed `fixlen_word` that every port, this one
+included, rejects as `InvalidMessage` on decode, so the encoder refuses it up
+front with `SofabException(SofabError.Argument)`, before writing a byte.
+
 ### Serialize stream
 
 Give the `OStream` a `FlushSink`, whose `(byte[] data, int offset, int length)`
