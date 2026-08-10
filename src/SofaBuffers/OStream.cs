@@ -637,11 +637,28 @@ public sealed class OStream
     /// <param name="from">start offset within <paramref name="data"/></param>
     /// <param name="length">number of payload bytes</param>
     /// <param name="subtype">fixed-length sub-type</param>
+    /// <exception cref="SofabException">
+    /// <see cref="SofabError.Argument"/> when <paramref name="subtype"/> is not one of the
+    /// four defined tags (0x4–0x7 are reserved) or when it is
+    /// <see cref="FixlenType.Fp32"/> / <see cref="FixlenType.Fp64"/> and
+    /// <paramref name="length"/> is not exactly 4 / 8. Both make a malformed
+    /// <c>fixlen_word</c> (CORELIB_PLAN §4.6), so the encoder rejects them rather than
+    /// emit bytes its own decoder reports as <c>INVALID</c>.
+    /// </exception>
     public void WriteFixlen(int id, byte[] data, int from, int length, FixlenType subtype)
     {
         if (length < 0)
         {
             throw new SofabException(SofabError.Argument, "length " + length);
+        }
+        if ((uint)subtype > (uint)FixlenType.Blob)
+        {
+            throw new SofabException(SofabError.Argument, "fixlen subtype " + (int)subtype);
+        }
+        if ((subtype == FixlenType.Fp32 && length != 4) || (subtype == FixlenType.Fp64 && length != 8))
+        {
+            throw new SofabException(
+                SofabError.Argument, "fixlen length " + length + " for " + subtype);
         }
         if (id < 0)
         {
