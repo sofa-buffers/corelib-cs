@@ -158,9 +158,14 @@ public sealed class OStream
     /// replacement, ever"); C# <c>string</c> is a Unicode type, so it is always
     /// strict (CORELIB_PLAN §6.4). Valid strings encode to exactly the same bytes
     /// as the default UTF-8 encoder.
+    /// <para>
+    /// One codec serves both directions: this is <see cref="Utf8.Strict"/>, the
+    /// same instance the decode side materializes a <c>string</c> payload with,
+    /// since <c>throwOnInvalidBytes</c> replaces the replacement-character fallback
+    /// of the encoder and of the decoder alike.
+    /// </para>
     /// </summary>
-    private static readonly UTF8Encoding StrictUtf8 =
-        new(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true);
+    private static readonly UTF8Encoding StrictUtf8 = Utf8.Strict;
 
     /// <summary>
     /// Create an encoder over <paramref name="buffer"/> with no flush sink.
