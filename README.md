@@ -217,9 +217,10 @@ input happened to be chunked (CORELIB_PLAN §5.2).
 
 `String` payloads reach the visitor as raw wire bytes: the decoder transcodes
 nothing and validates nothing, and a field the visitor ignores is skipped
-without ever being looked at (CORELIB_PLAN §6.4). Generated code materializes
-the C# `string` with a strict/fatal UTF-8 decoder, which is where invalid UTF-8
-becomes the `InvalidMessage` outcome.
+without ever being looked at (CORELIB_PLAN §6.4). Materializing the C# `string`
+is the consumer's step, and `Utf8.Decode` (see [Generated-code support
+layer](#generated-code-support-layer)) is the strict/fatal UTF-8 decoder that
+does it — which is where invalid UTF-8 becomes the `InvalidMessage` outcome.
 
 ### Deserialize stream
 
@@ -395,6 +396,36 @@ method serves the top level and every level below it. On the decode side each
 framing reads `Complete` / `Incomplete` per chunk and never needs a finish step.
 (This section's bytes, and both streaming legs, are executed by
 `ReadmeGeneratorExampleTests`.)
+
+### Generated-code support layer
+
+Around every codec call, generated code does the same few things: grow the array
+it is filling as elements actually arrive, reassemble a payload that arrived in
+pieces, turn validated bytes into a `string`. None of that is schema-specific — a
+`count`, a `maxlen` or a capacity is an argument, an element type is a type
+parameter — so it lives here instead of being emitted, rationale and all, into
+every generated source tree.
+
+| symbol | what it is |
+|---|---|
+| `Seq.EnsureCap<T>(array, index, cap)` | the array-growth policy: double, stop at the announced count, and never allocate from a count the wire claimed but has not delivered |
+| `Seq.ArrayInitCap` | the bounded first reservation for an array the schema does not bound (16 elements) |
+| `PayloadAcc` | reassembles a `string` / `blob` payload split across `Feed` calls — a payload that arrives whole never touches its buffer, and the value never depends on where the split fell |
+| `Utf8.Decode(data, offset, length)` | validate a byte range and materialize it, in that order — the only order in which invalid UTF-8 can still be rejected (§6.4) |
+
+```csharp
+private readonly PayloadAcc _acc = new();
+
+public void String(int id, int total, int offset, byte[] data, int co, int cl)
+{
+    string? s = _acc.String(total, offset, data, co, cl);   // null: more to come
+    if (s is not null) { /* route s to its field */ }
+}
+```
+
+These are ordinary public API, usable directly; they are simply shaped by what
+generated code needs. The output buffer stays with the caller either way — the
+encode scratch is generated, never allocated here (CORELIB_PLAN §5.1).
 
 ## Memory handling
 
