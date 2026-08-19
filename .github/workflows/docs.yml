@@ -23,6 +23,11 @@ jobs:
   build-docs:
     name: Build documentation
     runs-on: ubuntu-latest
+    # A wedged step has to fail fast and say which job it was: the account gets
+    # 20 concurrent Actions slots, and a job stuck on GitHub's 360-minute
+    # default holds one of them for six hours while everyone else queues.
+    # Installing DocFX, restoring and generating the site takes ~45 s.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
 
@@ -61,6 +66,9 @@ jobs:
     needs: build-docs
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    # ~10 s of actual work; the wait for the github-pages environment happens
+    # before the job starts and is not counted against this budget.
+    timeout-minutes: 10
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}

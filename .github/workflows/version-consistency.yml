@@ -1,0 +1,44 @@
+name: "Version consistency"
+
+# The git tag is the source of truth for the released version: the NuGet
+# package version baked into src/SofaBuffers/SofaBuffers.csproj must match it,
+# or `v0.10.0` on GitHub ships a package that calls itself something else.
+#
+# Tags only: the comparison is only meaningful when there is a tag to compare
+# against. Between releases <Version> may legitimately sit ahead of the newest
+# tag, so running this on every push and pull request would produce noise, not
+# signal — and cost a runner slot per run.
+on:
+  push:
+    tags: [ 'v*' ]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  check-versions:
+    name: Check version
+    runs-on: ubuntu-latest
+    # A checkout and one grep; see the note in ci.yml on why every job carries
+    # a bound at all. Ten minutes is the floor used across this repo.
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Check NuGet package version (SofaBuffers.csproj)
+        shell: bash
+        run: |
+          set -euo pipefail
+          csproj=src/SofaBuffers/SofaBuffers.csproj
+          ref_version=${GITHUB_REF_NAME#v}
+          version=$(grep -oP '<Version>\K[^<]+' "$csproj" | head -1)
+          [[ -n "$version" ]] || { echo "::error::$csproj: no <Version> element found"; exit 1; }
+          echo "tag: $ref_version, $csproj: $version"
+          [[ "$version" == "$ref_version" ]] || {
+            echo "::error::$csproj <Version>: '$version' != tag '$ref_version'"
+            exit 1
+          }

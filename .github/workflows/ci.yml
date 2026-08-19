@@ -21,6 +21,13 @@ jobs:
   build-test:
     name: Build & test (${{ matrix.tfm }}, ${{ matrix.configuration }})
     runs-on: ubuntu-latest
+    # A wedged step has to fail fast and say which job it was: the account gets
+    # 20 concurrent Actions slots, and a job stuck on GitHub's 360-minute
+    # default holds one of them for six hours while everyone else queues. A leg
+    # restores, builds and tests in ~40 s, so ten minutes is roughly fifteen
+    # times the normal run — long enough that a slow NuGet restore never trips
+    # it, short enough that a hang is visible within the hour.
+    timeout-minutes: 10
     strategy:
       fail-fast: false
       # Debug is a matrix dimension, not an extra step, so all four legs report
@@ -70,6 +77,9 @@ jobs:
   coverage:
     name: Coverage
     runs-on: ubuntu-latest
+    # ~40 s in recent runs (same suite as a build-test leg, plus the Cobertura
+    # collector and the badge push); see the note on build-test.
+    timeout-minutes: 10
     permissions:
       contents: write   # to push the badge JSON to the `badges` branch
     steps:
