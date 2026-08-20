@@ -76,11 +76,11 @@ jobs:
 
   coverage:
     name: Coverage
-    # It re-runs the whole suite to collect coverage, so there is no point in
-    # doing that while the suite is known to be broken: on a red build-test this
-    # job used to burn its own 44 seconds and a runner slot for a number nobody
-    # would look at.
-    needs: [build-test]
+    # Deliberately NOT `needs: [build-test]`. This job re-runs the suite to
+    # collect coverage, so making it wait serialises two full test runs: the
+    # measured cost was about 56 seconds of wall clock on every green push,
+    # against 44 runner-seconds saved on the ~3% that are red. It blocks
+    # nothing, so it runs alongside the tests.
     runs-on: ubuntu-latest
     # ~40 s in recent runs (same suite as a build-test leg, plus the Cobertura
     # collector and the badge push); see the note on build-test.
