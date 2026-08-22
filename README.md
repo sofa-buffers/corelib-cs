@@ -39,6 +39,13 @@ package needs only .NET 9 or later.
 None — only the .NET base class library (`System.Text`, `System.Buffers.Binary`).
 No reflection and no runtime codegen, so it is friendly to trimming and Native AOT.
 
+### Feature flags
+
+No build toggles — always the full format. In particular there is no
+`SOFAB_STRICT_UTF8` knob to turn off: C# `string` is a Unicode type and can
+never hold non-UTF-8 bytes, so this port is **always strict** (CORELIB_PLAN
+§6.4: "Unicode-string targets are always strict").
+
 ### Packaging
 
 NuGet package id `SofaBuffers.Corelib`; the assembly is `SofaBuffers.dll` and the
@@ -469,13 +476,6 @@ of the bytes stays with the caller.
   chunkOffset+chunkLength)`) and are valid only for the duration of the callback.
   Scalars and floats are passed by value (no boxing). A visitor that retains bytes
   must copy the chunk.
-
-## Feature flags
-
-No build toggles — always the full format. In particular there is no
-`SOFAB_STRICT_UTF8` knob to turn off: C# `string` is a Unicode type and can
-never hold non-UTF-8 bytes, so this port is **always strict** (CORELIB_PLAN
-§6.4: "Unicode-string targets are always strict").
 
 ## Build & test
 

@@ -17,6 +17,22 @@
  * with the facts that chapter held, which had to survive the move into the
  * sections §9 provides.
  *
+ * Shape alone is not enough for a README that is about to be shortened: a
+ * chapter can keep its heading and lose the fact a reader came for, and nothing
+ * the compiler sees notices. So the checks come in two halves.
+ *
+ *   Shape   — §9.1 the centered header block; §9.2 the badge block's CI /
+ *             coverage / Docs badges, in that order; §9 the exact `## ` list, in
+ *             order; §9.4 no API-documentation chapter at any heading level.
+ *   Content — §9.5 the Usage chapter still shows every example the plan lists;
+ *             §9.6 MIN_OUTPUT_BUFFER stated *inside* the memory chapter; §6.4
+ *             the port's UTF-8 position; and every in-document link resolving to
+ *             a heading that still exists.
+ *
+ * §6.1.1's closed generated-object name set is guarded too, by
+ * ReadmeGeneratorExampleTests.ReadmeNamesNothingOutsideTheClosedGeneratedSurface;
+ * it is not repeated here.
+ *
  * These are lint-shaped tests, not behaviour tests. They read the README, the
  * three .csproj files and bench/run_callgrind.sh from the source tree and fail
  * when the documented section list, target frameworks, SDK requirement,
@@ -135,11 +151,15 @@ public class ReadmeFactsTests
 
     /// <summary>
     /// CORELIB_PLAN §9: "Do not change the section ordering and do not invent new
-    /// top-level sections; that shared shape is the point." This README carried a
-    /// `## Strings &amp; UTF-8` chapter no other port has (issue #64) — its facts
-    /// belong in the sections §9 already provides, not in one of their own.
-    /// `## Feature flags` is not an invention: every port in the family carries
-    /// it, so it is de-facto family shape.
+    /// top-level sections; that shared shape is the point." The list below is
+    /// §9's, and only the first entry's wording is per-port
+    /// (`## SofaBuffers &lt;Language&gt; library`). Two chapters this README once
+    /// carried are not on it: `## Strings &amp; UTF-8` (issue #64) and
+    /// `## Feature flags` — the latter was believed to be de-facto family shape
+    /// until corelib-go#125 and corelib-cpp#122 removed it from those ports,
+    /// leaving C# the only one with an eighth chapter. A section that has facts
+    /// worth keeping is demoted to a `###` subsection of the chapter it belongs
+    /// to, never added as a row here.
     /// </summary>
     [Fact]
     public void ReadmeTopLevelSectionsAreTheSharedFamilyShape()
@@ -153,7 +173,6 @@ public class ReadmeFactsTests
                 "Why this design",         // §9.3
                 "Usage",                   // §9.5
                 "Memory handling",         // §9.6
-                "Feature flags",           // family-wide
                 "Build & test",            // §9.7
                 "Benchmarks",              // §9.8
             },
@@ -161,17 +180,26 @@ public class ReadmeFactsTests
     }
 
     /// <summary>
-    /// Deleting the invented chapter must not delete what it said. The two facts
-    /// it carried have a home in the §9 shape: the absent `SOFAB_STRICT_UTF8`
-    /// knob belongs where a reader looks for build toggles, and the encode-side
-    /// refusal belongs with the `WriteString` example that can trip it.
+    /// Deleting an invented chapter must not delete what it said. The facts the
+    /// two carried have a home in the §9 shape: the port's UTF-8 position with
+    /// the rest of what a reader needs before choosing the library, and the
+    /// encode-side refusal with the `WriteString` example that can trip it.
+    ///
+    /// §6.4 does <em>not</em> oblige this port to have a `SOFAB_STRICT_UTF8`
+    /// knob, so no check here demands one: C# `string` is a Unicode string type,
+    /// which "cannot hold non-UTF-8 bytes", so §6.4 makes such targets "always
+    /// strict" and lets them "omit it entirely (documented as always-ON)".
+    /// Only byte-container targets MUST expose the option — corelib-go and
+    /// corelib-c are the ports whose guards check for a live knob. What §6.4
+    /// does require of this port is the <em>documentation</em> of that position,
+    /// which is what the two assertions below hold on to.
     /// </summary>
     [Fact]
     public void ReadmeKeepsTheUtf8FactsInTheSectionsSection9Provides()
     {
         if (!HaveTree) return;
 
-        string flags = Section("## Feature flags");
+        string flags = Section("### Feature flags");
         Assert.Contains("SOFAB_STRICT_UTF8", flags, StringComparison.Ordinal);
         Assert.Contains("always strict", flags, StringComparison.Ordinal);
 
@@ -330,5 +358,190 @@ public class ReadmeFactsTests
             .OrderBy(s => s, StringComparer.Ordinal).ToArray();
 
         Assert.Equal(script, documented);
+    }
+
+    // ------------------------------------------------------------ §9 shape
+
+    /// <summary>
+    /// Level and text of every Markdown heading, fenced code skipped — the
+    /// text-carrying twin of <see cref="Headings(string)"/>.
+    /// </summary>
+    private static IEnumerable<(int Level, string Text)> HeadingLines()
+    {
+        string readme = Readme();
+        foreach ((int index, int level) in Headings(readme))
+        {
+            string line = readme.Substring(index).Split('\n')[0];
+            yield return (level, line.Substring(level).Trim());
+        }
+    }
+
+    /// <summary>
+    /// §9.1 fixes a generic header block every port reproduces verbatim: the
+    /// centered logo, the `# SofaBuffers` title, the two-line tagline and a link
+    /// back to the organization. It is the one part of the README that is not
+    /// about this port at all, so nothing in the C# tree can notice it going
+    /// missing.
+    /// </summary>
+    [Fact]
+    public void ReadmeOpensWithTheGenericHeaderBlock()
+    {
+        if (!HaveTree) return;
+
+        string readme = Readme();
+        Assert.Contains("<p align=\"center\"><img src=\"assets/sofabuffers_logo.png\"", readme,
+                        StringComparison.Ordinal);
+        Assert.Contains("\n# SofaBuffers\n", readme, StringComparison.Ordinal);
+        Assert.Contains("<b>Structured Objects For Anyone</b><br>", readme, StringComparison.Ordinal);
+        Assert.Contains("<i>... so optimized, feels amazing.</i>", readme, StringComparison.Ordinal);
+        Assert.Contains("https://github.com/sofa-buffers", readme, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// §9.2 opens the library section with badges, "CI, coverage, and a Docs
+    /// badge" in that order, ahead of the GitHub link and the summary. The Docs
+    /// badge is load-bearing beyond decoration: §9.4 makes it the README's only
+    /// pointer to the API reference, so losing it strands every per-symbol
+    /// detail this README is allowed to leave out.
+    ///
+    /// Extra badges are fine (this port publishes a branch-coverage one beside
+    /// the line-coverage one); the three §9.2 names must be present and in
+    /// §9.2's relative order.
+    /// </summary>
+    [Fact]
+    public void ReadmeBadgeBlockLeadsWithCiCoverageAndDocs()
+    {
+        if (!HaveTree) return;
+
+        string section = Section("## SofaBuffers C# library");
+        // The badge block is everything up to the first blank line after the
+        // heading: §9.2 puts it before the GitHub link and the prose summary.
+        string[] lines = section.Split('\n');
+        var badges = new List<string>();
+        bool started = false;
+        foreach (string line in lines.Skip(1))
+        {
+            Match m = Regex.Match(line.Trim(), @"^\[!\[([^\]]+)\]");
+            if (m.Success)
+            {
+                started = true;
+                badges.Add(m.Groups[1].Value);
+            }
+            else if (started)
+            {
+                break;
+            }
+        }
+
+        Assert.NotEmpty(badges);
+        string[] ranked = badges
+            .Where(b => b is "CI" or "Coverage" or "Docs")
+            .ToArray();
+        Assert.Equal(new[] { "CI", "Coverage", "Docs" }, ranked);
+    }
+
+    /// <summary>
+    /// §9.4: "There is no API-documentation chapter." The Docs badge is the
+    /// single entry point, so a `## API reference` would not become legal by
+    /// being demoted — the check runs at every heading level.
+    /// </summary>
+    [Fact]
+    public void ReadmeHasNoApiDocumentationChapter()
+    {
+        if (!HaveTree) return;
+
+        string[] forbidden = { "api reference", "api documentation", "api docs", "source documentation" };
+        foreach ((int level, string text) in HeadingLines())
+        {
+            Assert.DoesNotContain(text.ToLowerInvariant(), forbidden);
+        }
+    }
+
+    // ---------------------------------------------------------- §9 content
+
+    /// <summary>
+    /// §9.5 lists the examples every port's Usage chapter carries: simple
+    /// encode, simple decode, streaming a message larger than the buffer, the
+    /// OStream and IStream wrappers, and the generator path. Each one is a use
+    /// case, not prose — dropping a heading here drops the use case with it. The
+    /// wording is the family's; only the code inside is per-language.
+    /// </summary>
+    [Fact]
+    public void UsageShowsEveryExampleThePlanLists()
+    {
+        if (!HaveTree) return;
+
+        string usage = Section("## Usage");
+        foreach (string example in new[]
+                 {
+                     "### Serialize\n",         // §9.5 simple encode + OStream
+                     "### Serialize stream\n",  // §9.5 larger than the buffer
+                     "### Deserialize\n",       // §9.5 simple decode + IStream
+                     "### Deserialize stream\n",
+                     "### Code generator\n",    // §9.5 the generated-object path
+                 })
+        {
+            Assert.Contains(example, usage, StringComparison.Ordinal);
+        }
+
+        // Every example is runnable code, so each heading owns a fenced block.
+        Assert.True(usage.Split("```csharp").Length - 1 >= 5,
+                    "the Usage chapter lost a runnable C# example");
+    }
+
+    /// <summary>
+    /// §9.6 puts `MIN_OUTPUT_BUFFER` in the memory chapter specifically: it is
+    /// the number a caller needs before it can size a streaming buffer, and the
+    /// memory chapter is where they go to find out who allocates what, so
+    /// stating it anywhere else does not reach them. The constant's *value* is
+    /// checked against the code by MinOutputBufferTests; what is checked here is
+    /// that the README states it, in that chapter.
+    /// </summary>
+    [Fact]
+    public void MemoryChapterStatesMinOutputBuffer()
+    {
+        if (!HaveTree) return;
+
+        string memory = Section("## Memory handling");
+        Assert.Contains("MIN_OUTPUT_BUFFER", memory, StringComparison.Ordinal);
+        Assert.Contains("MinOutputBuffer", memory, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A heading that moves takes its anchor with it, which is the cheapest way
+    /// for a restructuring to break navigation while breaking nothing a build
+    /// can see. Every `](#anchor)` must name a heading the document still has.
+    /// </summary>
+    [Fact]
+    public void EveryInDocumentLinkResolvesToAHeading()
+    {
+        if (!HaveTree) return;
+
+        var anchors = HeadingLines().Select(h => GitHubAnchor(h.Text)).ToHashSet(StringComparer.Ordinal);
+        MatchCollection links = Regex.Matches(Readme(), @"\]\(#([^)]+)\)");
+        Assert.NotEmpty(links);   // a vacuous pass would mean the scan broke
+        foreach (Match link in links)
+        {
+            Assert.Contains(link.Groups[1].Value, anchors);
+        }
+    }
+
+    /// <summary>Slugifies a heading the way GitHub does: lowercase, punctuation
+    /// dropped, spaces to hyphens.</summary>
+    private static string GitHubAnchor(string title)
+    {
+        var sb = new System.Text.StringBuilder();
+        foreach (char c in title.ToLowerInvariant())
+        {
+            if (char.IsAsciiLetterOrDigit(c) || c == '-' || c == '_')
+            {
+                sb.Append(c);
+            }
+            else if (c == ' ')
+            {
+                sb.Append('-');
+            }
+        }
+        return sb.ToString();
     }
 }
