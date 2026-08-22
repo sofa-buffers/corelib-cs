@@ -28,16 +28,21 @@ format is byte-for-byte compatible with the other SofaBuffers language ports.
 
 .NET SDK 10.0. Every project in the solution multi-targets `net9.0` and
 `net10.0`, and `dotnet restore` resolves *all* of a solution's target frameworks
-regardless of which one you then build, so the newest SDK is the minimum for
-building or testing either leg; the .NET 9 runtime has to be installed as well to
-run the `net9.0` leg (which is why every workflow that restores — CI *and* the
-docs build — installs both). Consuming the published
-package needs only .NET 9 or later.
+regardless of which one you build, so the newest SDK is the minimum for either
+leg; the `net9.0` leg additionally needs the .NET 9 runtime installed. Consuming
+the published package needs only .NET 9 or later.
 
 ### Dependencies
 
 None — only the .NET base class library (`System.Text`, `System.Buffers.Binary`).
 No reflection and no runtime codegen, so it is friendly to trimming and Native AOT.
+
+### Feature flags
+
+No build toggles — always the full format. In particular there is no
+`SOFAB_STRICT_UTF8` knob to turn off: C# `string` is a Unicode type and can
+never hold non-UTF-8 bytes, so this port is **always strict** (CORELIB_PLAN
+§6.4: "Unicode-string targets are always strict").
 
 ### Packaging
 
@@ -62,11 +67,10 @@ dotnet add package SofaBuffers.Corelib
 
 ## Usage
 
-The codec has four use cases — serialize a message that fits in one buffer,
-serialize one too large for the buffer (streamed out in chunks), deserialize a
-whole message, and deserialize one arriving in chunks — plus the generated-code
-path that wraps them. Encoder and decoder report problems by throwing
-`SofabException` (which extends `IOException`); the cause is on `SofabException.Error`.
+Four codec use cases — a message that fits in one buffer and one too large for
+it, each way — plus the generated-code path that wraps them. Encoder and decoder
+report problems by throwing `SofabException` (which extends `IOException`); the
+cause is on `SofabException.Error`.
 
 ### Serialize
 
@@ -89,21 +93,19 @@ field a schema can produce. The raw escape hatch `WriteFixlen(id, data, from,
 length, subtype)` writes one directly, and holds the caller to what the wire
 allows (CORELIB_PLAN §4.6): `subtype` must be one of the four defined tags —
 `0x4`–`0x7` are reserved — and `Fp32` / `Fp64` must declare exactly 4 / 8 payload
-bytes. Anything else is a malformed `fixlen_word` that every port, this one
-included, rejects as `InvalidMessage` on decode, so the encoder refuses it up
-front with `SofabException(SofabError.Argument)`, before writing a byte.
+bytes. Anything else is refused with `SofabException(SofabError.Argument)` before
+a byte is written.
 
 `WriteString` takes a C# `string`, a Unicode type, and transcodes it to UTF-8 on
 the way out — `WriteBlob` is the call for arbitrary bytes (MESSAGE_SPEC §8). A
 value with no valid UTF-8 encoding, i.e. one carrying an unpaired surrogate, is
 refused with `SofabException(SofabError.Argument)` rather than silently
-substituted with `U+FFFD` the way the default `Encoding.UTF8` does; silent
-replacement is a data mutation the spec forbids. The refusal is **atomic at
-every length**: no byte is written, `BytesUsed` does not advance, and a header
-held back by `WriteSequenceBeginLazy` is not committed, so catching it and
-closing the sequence still lets an otherwise-empty sequence vanish
-(MESSAGE_SPEC §2) instead of framing an empty `26 07`. Valid strings — embedded
-`U+0000` included — encode to exactly the bytes `Encoding.UTF8` would produce.
+substituted with `U+FFFD` the way the default `Encoding.UTF8` does. The refusal is
+**atomic at every length**: no byte is written, `BytesUsed` does not advance, and
+a header held back by `WriteSequenceBeginLazy` is not committed, so an otherwise
+empty sequence can still vanish (MESSAGE_SPEC §2) rather than frame an empty
+`26 07`. Valid strings — embedded `U+0000` included — encode to exactly the bytes
+`Encoding.UTF8` would produce.
 
 ### Serialize stream
 
@@ -126,11 +128,10 @@ os.Flush();                                    // push the tail
 
 A sink that only *copies* the bytes — as `Stream.Write` does — returns without
 doing anything else, and the encoder resumes at offset 0 of the same array. A
-zero-copy sink instead **takes** the buffer (hands it to a transport, queues it
-for an asynchronous write) and must install a replacement before it returns, with
-`BufferSet(buffer, offset)`. The start offset belongs to that installation, not to
-the buffer, so a sink can reserve framing-header room in *every* packet —
-installing the same array again re-arms the reservation:
+zero-copy sink instead **takes** the buffer and must install a replacement before
+it returns, with `BufferSet(buffer, offset)`. The start offset belongs to that
+installation, not to the buffer, so a sink can reserve framing-header room in
+*every* packet — installing the same array again re-arms the reservation:
 
 ```csharp
 byte[] a = new byte[512], b = new byte[512];   // two packet buffers
@@ -149,12 +150,11 @@ os = new OStream(a, 3, sink);                  // first packet's header room
 A sequence (a nested struct/union, or an array of variable-size elements) is
 opened with `WriteSequenceBeginLazy` and closed with one of two closers. The
 header is **held back** until the sequence turns out to have content, so a
-sequence closed with nothing in it emits nothing at all — which is exactly
-MESSAGE_SPEC §2's rule that a sequence-typed field equal to its declared default
-is omitted rather than framed empty. Nothing is buffered: the held-back ids are
-encoder state, so a tiny output buffer still produces the one-shot bytes. The
-hold-back reaches the format's full `MAX_DEPTH` (255) — the pending run grows on
-demand, so the encoding is canonical at every nesting depth.
+sequence closed with nothing in it emits nothing at all (MESSAGE_SPEC §2: a
+sequence-typed field equal to its declared default is omitted, not framed empty).
+Nothing is buffered — the held-back ids are encoder state, so a tiny output
+buffer still produces the one-shot bytes — and the hold-back reaches the format's
+full `MAX_DEPTH` (255).
 
 ```csharp
 os.WriteSequenceBeginLazy(4);
@@ -170,8 +170,7 @@ os.WriteSequenceEndKeep();     // 06 07 — the frame is forced out even when em
 ```
 
 Those seven calls produce exactly `26 09 05 07 06 07` — six bytes, with the whole
-middle sequence gone. (Byte-for-byte asserted by `ReadmeNestedSequencesExample`
-in the encoder test suite.)
+middle sequence gone.
 
 Which closer to use is a static property of the position in the schema, not of
 the value:
@@ -212,15 +211,15 @@ new IStream().Feed(buf, 0, used, sink);
 A field that declares a size is announced on the word that declares it, before
 any payload: `ArrayBegin(id, kind, count)` for an array, `FixlenBegin(id,
 subtype, total)` for a string / blob / float. That is where a schema `count` or
-`maxlen` bound belongs — judged there, the verdict cannot depend on where the
-input happened to be chunked (CORELIB_PLAN §5.2).
+`maxlen` bound belongs, so that the verdict cannot depend on where the input was
+chunked (CORELIB_PLAN §5.2).
 
 `String` payloads reach the visitor as raw wire bytes: the decoder transcodes
-nothing and validates nothing, and a field the visitor ignores is skipped
-without ever being looked at (CORELIB_PLAN §6.4). Materializing the C# `string`
-is the consumer's step, and `Utf8.Decode` (see [Generated-code support
-layer](#generated-code-support-layer)) is the strict/fatal UTF-8 decoder that
-does it — which is where invalid UTF-8 becomes the `InvalidMessage` outcome.
+nothing and validates nothing, and a field the visitor ignores is skipped without
+ever being looked at (CORELIB_PLAN §6.4). Materializing the C# `string` is the
+consumer's step, and `Utf8.Decode` (see [Generated-code support
+layer](#generated-code-support-layer)) is the strict/fatal UTF-8 decoder that does
+it — where invalid UTF-8 becomes the `InvalidMessage` outcome.
 
 ### Deserialize stream
 
@@ -248,45 +247,35 @@ means they end *inside* a field (a partial varint, an unfinished string / blob /
 array payload, or a still-open nested sequence): **not** an error and **not** a
 rejection — the partial field is held and the next `Feed` resumes where it left
 off. There is no finish / finalize step: the caller owns end-of-input and decides
-whether a trailing `Incomplete` is a truncation for its protocol. Genuinely
-malformed input — regardless of what follows — still throws `SofabException`
-with `SofabError.InvalidMessage`.
+whether a trailing `Incomplete` is a truncation for its protocol. Malformed input
+throws `SofabException` with `SofabError.InvalidMessage`.
 
-**That rejection is terminal** (CORELIB_PLAN §5.2 lists `INVALID` as *"no —
-terminal"*). Once a `Feed` has thrown `InvalidMessage`, the `IStream` latches the
-verdict: `Status` answers `DecodeStatus.Invalid` from then on, and every later
-`Feed` throws `InvalidMessage` again — consuming nothing, emitting no visitor
-callback. No continuation of bytes can make malformed input valid, so a caller
-that logs the exception and keeps reading its socket can neither resume decoding
-nor ever see `Complete` for a stream this decoder already rejected; decode the
-next message with a new `IStream`. (`Invalid` is thus reported by `Status`, never
-returned by `Feed`, which throws instead.) A `SofabException` carrying
+**That rejection is terminal** (CORELIB_PLAN §5.2). Once a `Feed` has thrown
+`InvalidMessage`, the `IStream` latches the verdict: `Status` answers
+`DecodeStatus.Invalid` from then on, and every later `Feed` throws
+`InvalidMessage` again — consuming nothing, emitting no visitor callback. Decode
+the next message with a new `IStream`. (`Invalid` is thus reported by `Status`,
+never returned by `Feed`, which throws instead.) A `SofabException` carrying
 `InvalidMessage` that a *visitor* raises — generated code judging a schema bound
-(MESSAGE_SPEC §7.1) or a strict-UTF-8 payload (§6.4) — is the same terminal
-outcome and latches the same way.
+(MESSAGE_SPEC §7.1) or a strict-UTF-8 payload (§6.4) — latches the same way.
 
-Generated decode code may also enforce receiver-side limits on unbounded
-(schema declares no `count` / `maxlen`) fields — `max_dyn_array_count`,
+Generated decode code may also enforce receiver-side limits on unbounded (schema
+declares no `count` / `maxlen`) fields — `max_dyn_array_count`,
 `max_dyn_string_len`, `max_dyn_blob_len` caps baked in by `sofabgen`. A field
 whose wire count or total length exceeds its cap throws `SofabException` with
 `SofabError.LimitExceeded`, raised *before* any allocation and never clamped or
-truncated. This is a category deliberately **distinct** from
-`SofabError.InvalidMessage`: exceeding a configured cap is receiver *policy*, not
-wire malformation, so two peers with different caps do not read as a conformance
-divergence. This corelib enforces no limits and ships no default cap values — it
-only defines the `LimitExceeded` category so generated code reports a violation
-uniformly. A limit rejection is terminal as well (§6.2.1), so it too closes the
-`IStream` to further feeds; but because those bytes are *well-formed*, §6.3
-forbids folding it into the `INVALID` decode outcome, and `Status` never reports
-`Invalid` for it — it stays `Incomplete`, which is what happened: the decoder
-stopped part-way through a message and will not finish it.
+truncated. That category is **distinct** from `SofabError.InvalidMessage`:
+exceeding a configured cap is receiver policy, not wire malformation. This
+corelib enforces no limits and ships no default cap values — it only defines the
+category so generated code reports a violation uniformly. A limit rejection is
+terminal as well (§6.2.1) and closes the `IStream` to further feeds, but `Status`
+never reports `Invalid` for it — it stays `Incomplete` (§6.3).
 
 ### Code generator
 
 The common case is *not* to call the primitives by hand but to let `sofabgen`
-emit one typed class per message. Its surface is the same in every language port
-— CORELIB_PLAN §6.1.1 closes the name set and lets a port adapt only the casing,
-so a developer learns these once, not once per language:
+emit one typed class per message. CORELIB_PLAN §6.1.1 closes that name set and
+lets a port adapt only the casing, so the surface is the same in every port:
 
 | generated member | what it is |
 |---|---|
@@ -369,8 +358,7 @@ Both are thin wrappers over the streaming pair, which is what to reach for when
 the message does not fit — or when the bytes arrive from a socket rather than in
 one array. `Serialize` takes an `OStream` the *caller* owns, so give it a scratch
 buffer with a `FlushSink` and the bytes leave as it fills; `Decoder.Feed` accepts
-chunks of any size, so the decode side is driven by whatever the transport hands
-over. Neither side ever holds the whole message:
+chunks of any size. Neither side ever holds the whole message:
 
 ```csharp
 using System.IO;
@@ -389,22 +377,17 @@ for (int i = 0; i < wire.Length; i++)
 // dec.Message.X == 3, dec.Message.Y == 4
 ```
 
-`Serialize` writes this message's fields and nothing else, which is exactly why a
-nested message can be written into an already-open sequence frame — the same
-method serves the top level and every level below it. On the decode side each
-`Feed` returns the outcome for everything fed so far, so a caller that owns its
-framing reads `Complete` / `Incomplete` per chunk and never needs a finish step.
-(This section's bytes, and both streaming legs, are executed by
-`ReadmeGeneratorExampleTests`.)
+`Serialize` writes this message's fields and nothing else, so a nested message can
+be written into an already-open sequence frame — the same method serves the top
+level and every level below it. On the decode side each `Feed` returns the outcome
+for everything fed so far.
 
 ### Generated-code support layer
 
 Around every codec call, generated code does the same few things: grow the array
-it is filling as elements actually arrive, reassemble a payload that arrived in
-pieces, turn validated bytes into a `string`. None of that is schema-specific — a
-`count`, a `maxlen` or a capacity is an argument, an element type is a type
-parameter — so it lives here instead of being emitted, rationale and all, into
-every generated source tree.
+it is filling as elements arrive, reassemble a payload that arrived in pieces,
+turn validated bytes into a `string`. None of that is schema-specific, so it lives
+here rather than being emitted into every generated source tree.
 
 | symbol | what it is |
 |---|---|
@@ -423,9 +406,9 @@ public void String(int id, int total, int offset, byte[] data, int co, int cl)
 }
 ```
 
-These are ordinary public API, usable directly; they are simply shaped by what
-generated code needs. The output buffer stays with the caller either way — the
-encode scratch is generated, never allocated here (CORELIB_PLAN §5.1).
+These are ordinary public API, usable directly. The encode scratch buffer stays
+with the caller either way — it is generated, never allocated here
+(CORELIB_PLAN §5.1).
 
 ## Memory handling
 
@@ -443,39 +426,30 @@ of the bytes stays with the caller.
   call's* offset (reserved header room and all) instead of at 0. The offset is
   consumed by the flush it was installed in: a later flush the sink returns from
   without installing anything resumes at 0 again (CORELIB_PLAN §5.1).
-- **No payload-sized temporaries.** That "never allocates" holds for `string` too,
-  the one payload that has to be *transcoded* rather than copied: when the value is
-  longer than the room left in the buffer, `WriteString` transcodes it in pieces
+- **No payload-sized temporaries.** `string` is the one payload that has to be
+  *transcoded* rather than copied, and it allocates nothing either: when the value
+  is longer than the room left in the buffer, `WriteString` transcodes it in pieces
   straight into that room — carrying a split surrogate pair across the flush with a
-  stateful encoder — instead of materializing the UTF-8 bytes first. So the buffer,
-  not the message, bounds peak memory (CORELIB_PLAN §5.1: the payload run of a
-  `string` is *divisible* at any byte boundary): a 64 MB string streams through a
-  16-byte buffer in 16-byte pieces, and a `string` with no schema `maxlen` is not a
-  memory risk. Output bytes are identical either way.
+  stateful encoder — instead of materializing the UTF-8 bytes first (CORELIB_PLAN
+  §5.1: the payload run of a `string` is *divisible* at any byte boundary). The
+  buffer, not the message, bounds peak memory: a 64 MB string streams through a
+  16-byte buffer in 16-byte pieces. Output bytes are identical either way.
 - **`Sofab.MinOutputBuffer` = 1 (`MIN_OUTPUT_BUFFER`, CORELIB_PLAN §5.1).** The
-  smallest buffer accepted **for streaming**. This encoder splits every atomic unit
-  across a flush, so one byte is enough: any message streams through a one-byte
-  buffer and produces bytes identical to the one-shot path. The minimum applies
-  **only to a buffer installed with a `FlushSink`** — at construction and at every
-  `BufferSet` — where `buffer.Length - offset >= Sofab.MinOutputBuffer` must hold;
-  a buffer that falls short is rejected right there with an
-  `ArgumentOutOfRangeException`, the same way an out-of-range offset is, never
-  partway through a message. A buffer installed **without** a sink is subject to no
-  minimum at all: no flush can occur, so a message sized from a bounded schema's
-  `MaxSize` fits exactly — a two-byte message encodes into a two-byte buffer — and
-  anything larger reports `SofabError.BufferFull`.
+  smallest buffer accepted **for streaming**: this encoder splits every atomic unit
+  across a flush, so any message streams through a one-byte buffer and produces
+  bytes identical to the one-shot path. The minimum applies **only to a buffer
+  installed with a `FlushSink`** — at construction and at every `BufferSet` — where
+  `buffer.Length - offset >= Sofab.MinOutputBuffer` must hold; a buffer that falls
+  short is rejected right there with an `ArgumentOutOfRangeException`, never
+  partway through a message. A buffer installed **without** a sink has no minimum:
+  a message sized from a bounded schema's `MaxSize` fits exactly — a two-byte
+  message encodes into a two-byte buffer — and anything larger reports
+  `SofabError.BufferFull`.
 - **Decode (`IStream` + `IVisitor`).** The `byte[]` you `Feed` is aliased, not
   copied: `String` / `Blob` chunks point directly into it (`data[chunkOffset ..
   chunkOffset+chunkLength)`) and are valid only for the duration of the callback.
   Scalars and floats are passed by value (no boxing). A visitor that retains bytes
   must copy the chunk.
-
-## Feature flags
-
-No build toggles — always the full format. In particular there is no
-`SOFAB_STRICT_UTF8` knob to turn off: C# `string` is a Unicode type and can
-never hold non-UTF-8 bytes, so this port is **always strict** (CORELIB_PLAN
-§6.4: "Unicode-string targets are always strict").
 
 ## Build & test
 
@@ -488,15 +462,12 @@ dotnet test  SofaBuffers.sln                # run the xUnit suite
 Requires the .NET SDK 10 and the .NET 9 runtime (see [Requirements](#requirements)).
 All three commands cover both target frameworks; append `-f net9.0` / `-f net10.0`
 to `build` or `test` to narrow a run to one of them, and `-c Debug` / `-c Release`
-to pick a configuration. CI crosses the two axes: four legs build *and* run the
-suite in Debug and Release on each framework, so unoptimized code paths and
-`#if DEBUG` code are compiled and exercised too. The `.devcontainer/` builds a
-ready-to-use image with the SDKs and tooling preinstalled. Tests live in `tests/SofaBuffers.Tests/`, including
-conformance replay of the shared language-agnostic vectors (byte-exact encode,
-field-match decode, byte-at-a-time chunked decode). Helpers used by more than one
-test file live in `tests/SofaBuffers.Tests/Common/` — `RecordingVisitor` plus
-`TestBytes.Bytes`/`Encode`; import the latter with
-`using static SofaBuffers.Tests.Common.TestBytes;` rather than re-declaring them.
+to pick a configuration. CI crosses the two axes and runs all four legs. The
+`.devcontainer/` builds a ready-to-use image with the SDKs and tooling
+preinstalled. Tests live in `tests/SofaBuffers.Tests/`, including conformance
+replay of the shared language-agnostic vectors (byte-exact encode, field-match
+decode, byte-at-a-time chunked decode); helpers shared between test files live in
+its `Common/`.
 
 ## Benchmarks
 
@@ -539,14 +510,13 @@ bash bench/run_callgrind.sh
 # workloads: encode_u64_array, encode_typical, encode_blob_oneshot, encode_blob_streaming, encode_composite, decode_u64_array, decode_typical, decode_blob, decode_composite, decode_composite_skip
 ```
 
-Because the .NET runtime JITs the hot code at run time there is no stable native
-symbol to `--toggle-collect` on, so the script runs each workload at two rep
-counts and subtracts the whole-process instruction counts
-(`Ir/op = (Ir(R2) − Ir(R1)) / (R2 − R1)`), which cancels CLR startup, JIT and
-one-time setup exactly and leaves the pure per-op cost. It pins the runtime
-(`DOTNET_TieredCompilation=0`, a gen0 large enough that the bounded run never
-collects, a heap-limit cap so the GC initializes under Valgrind) so the two runs
-differ only in the rep count.
+The .NET runtime JITs the hot code, so there is no stable native symbol to
+`--toggle-collect` on: the script runs each workload at two rep counts and
+subtracts the whole-process instruction counts
+(`Ir/op = (Ir(R2) − Ir(R1)) / (R2 − R1)`), cancelling CLR startup, JIT and
+one-time setup. It pins the runtime (`DOTNET_TieredCompilation=0`, a gen0 large
+enough that the bounded run never collects, a heap-limit cap so the GC initializes
+under Valgrind) so the two runs differ only in the rep count.
 
 One measurement, on one shared container (`net10.0`, .NET 10.0.302) — the MB/s
 column is this machine, the Ir/op column is not:
@@ -565,26 +535,18 @@ column is this machine, the Ir/op column is not:
 | decode: composite skip-all |    21,609 |     502.02 |
 
 **Read the two `blob 1MB` encode rows against each other, not against the rest.**
-Five of that message's bytes are metadata and a million are payload, so its MB/s
-is this machine's memory bandwidth rather than a statement about the library —
-and the streamed row comes out *ahead* of the one-shot one, because a 4 KiB window
-stays in L1 while a one-shot encode writes a megabyte out to memory. Their Ir/op
-gap has to be read with the same care, because on this runtime it is an artifact
-of how Callgrind counts a bulk copy: a bare `Array.Copy` of a megabyte costs
-~1,000,000 Ir whether the destination starts at offset 0 or at 5, while the same
-volume copied as 245 × 4096 bytes costs 70,629 — the big copy takes a
-repeat-string path Callgrind charges about one instruction per byte, the 4 KiB
-ones a vectorized path at ~0.07. So the honest reading of the pair is not
-"streaming is 6.5× cheaper": it is that the streamed row's 155,458 Ir sits
-84,829 above the 70,629 a bare chunked copy of the same bytes costs, i.e. **~346
-Ir per flush** is what the divisible-run path (CORELIB_PLAN §5.1) costs here.
-
-`decode: blob 1MB` is the same kind of row: the decoder hands the visitor a window
-into the input and copies nothing, so 39,522 Ir — 161 per 4096-byte chunk — buys a
-megabyte, and the MB/s figure says more about that than about memory.
+Five of that message's bytes are metadata and a million are payload, so their MB/s
+is this machine's memory bandwidth. Their Ir/op gap is not a 6.5× streaming win
+either, but how Callgrind charges a bulk copy: a bare `Array.Copy` of a megabyte
+costs ~1,000,000 Ir at any destination offset, while the same volume copied as
+245 × 4096 bytes costs 70,629. Measured against that 70,629, the streamed row's
+155,458 leaves **~346 Ir per flush** for the divisible-run path (CORELIB_PLAN
+§5.1). `decode: blob 1MB` is the same kind of row — the decoder hands the visitor
+a window into the input and copies nothing, so its 39,522 Ir is 161 per 4096-byte
+chunk.
 
 `decode: composite skip-all` lands within half a percent of `decode: composite`
-(21,609 against 21,708). In a push port "skip everything" is a visitor that
-overrides nothing, so what it saves is the callback bodies alone: the walk, the
-UTF-8 validation and the chunk bookkeeping are the decode, and none of them can be
-skipped. A router that materializes nothing pays essentially full price here.
+(21,609 against 21,708): in a push port "skip everything" is a visitor that
+overrides nothing, so it saves the callback bodies alone — the walk, the UTF-8
+validation and the chunk bookkeeping are the decode, and a router that
+materializes nothing pays essentially full price.
