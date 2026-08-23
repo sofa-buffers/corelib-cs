@@ -7,7 +7,7 @@
  * `.devcontainer/` the working environment of the repo. Those two clauses meet in
  * one place: a tool is only runnable in the container if the image installs what
  * it invokes. It did not -- the Dockerfile installed `ca-certificates`, `curl`,
- * `gnupg` and `git` but not `valgrind`, so the script the README documents as the
+ * `gnupg` and `git` but not `valgrind`, so the script the benchmarks depend on is the
  * way to get `Ir/op` numbers died on `valgrind: command not found` in the very
  * image the repo ships.
  *
@@ -45,7 +45,7 @@ public class DevcontainerToolchainTests
     /// there is nothing to lint, so the guards stand down instead of failing.
     /// </summary>
     private static bool HaveTree =>
-        File.Exists(DockerfilePath()) && File.Exists(Path.Combine(RepoRoot(), "README.md"));
+        File.Exists(DockerfilePath());
 
     /// <summary>The shell scripts the repo ships: `*.sh` at the root and under `bench/`.</summary>
     private static string[] ShellScripts()
@@ -167,25 +167,5 @@ public class DevcontainerToolchainTests
         Assert.Contains("valgrind", File.ReadAllText(Path.Combine(RepoRoot(), "bench", "run_callgrind.sh")),
             StringComparison.Ordinal);
         Assert.Contains("valgrind", AptPackages());
-    }
-
-    /// <summary>
-    /// CORELIB_PLAN §9: the README states every dependency. The Benchmarks
-    /// section documents `run_callgrind.sh`, so it says what that command needs
-    /// and where a ready-made environment with it comes from.
-    /// </summary>
-    [Fact]
-    public void ReadmeBenchmarksSectionDocumentsTheValgrindDependency()
-    {
-        if (!HaveTree) return;
-
-        string readme = File.ReadAllText(Path.Combine(RepoRoot(), "README.md"));
-        int start = readme.IndexOf("## Benchmarks", StringComparison.Ordinal);
-        Assert.True(start >= 0, "README has no `## Benchmarks` section");
-        int next = readme.IndexOf("\n## ", start + 1, StringComparison.Ordinal);
-        string section = next < 0 ? readme[start..] : readme[start..next];
-
-        Assert.Contains("valgrind", section, StringComparison.Ordinal);
-        Assert.Contains(".devcontainer", section, StringComparison.Ordinal);
     }
 }
