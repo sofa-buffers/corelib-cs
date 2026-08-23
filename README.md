@@ -518,35 +518,22 @@ one-time setup. It pins the runtime (`DOTNET_TieredCompilation=0`, a gen0 large
 enough that the bounded run never collects, a heap-limit cap so the GC initializes
 under Valgrind) so the two runs differ only in the rep count.
 
-One measurement, on one shared container (`net10.0`, .NET 10.0.302) — the MB/s
-column is this machine, the Ir/op column is not:
-
-| workload | Ir/op | MB/s |
-|---|---:|---:|
-| encode: u64 array (1000)   |    64,417 |   2,169.28 |
-| encode: typical message    |     1,591 |     133.57 |
-| encode: blob 1MB one-shot  | 1,008,631 |  35,615.69 |
-| encode: blob 1MB streaming |   155,458 |  42,797.57 |
-| encode: composite          |    22,661 |     601.78 |
-| decode: u64 array (1000)   |   107,102 |   1,697.40 |
-| decode: typical message    |     2,447 |     150.42 |
-| decode: blob 1MB           |    39,522 | 392,692.15 |
-| decode: composite          |    21,708 |     570.68 |
-| decode: composite skip-all |    21,609 |     502.02 |
-
 **Read the two `blob 1MB` encode rows against each other, not against the rest.**
-Five of that message's bytes are metadata and a million are payload, so their MB/s
-is this machine's memory bandwidth. Their Ir/op gap is not a 6.5× streaming win
+Five of that message's bytes are metadata and a million are payload, so their
+MB/s is this machine's memory bandwidth. Their Ir/op gap is not a streaming win
 either, but how Callgrind charges a bulk copy: a bare `Array.Copy` of a megabyte
-costs ~1,000,000 Ir at any destination offset, while the same volume copied as
-245 × 4096 bytes costs 70,629. Measured against that 70,629, the streamed row's
-155,458 leaves **~346 Ir per flush** for the divisible-run path (CORELIB_PLAN
-§5.1). `decode: blob 1MB` is the same kind of row — the decoder hands the visitor
-a window into the input and copies nothing, so its 39,522 Ir is 161 per 4096-byte
-chunk.
+costs about a million Ir at any destination offset, while the same volume copied
+as 245 × 4096 bytes costs far less, and the remainder is what the divisible-run
+path (CORELIB_PLAN §5.1) charges per flush. `decode: blob 1MB` is the same kind
+of row — the decoder hands the visitor a window into the input and copies
+nothing.
 
-`decode: composite skip-all` lands within half a percent of `decode: composite`
-(21,609 against 21,708): in a push port "skip everything" is a visitor that
-overrides nothing, so it saves the callback bodies alone — the walk, the UTF-8
+Measured figures are not reproduced here — they belong to the cross-language
+benchmark arena, which runs every port on one host under one methodology. This
+section says how to obtain them, not what they came out as.
+
+`decode: composite skip-all` lands within half a percent of `decode: composite`:
+in a push port "skip everything" is a visitor that overrides nothing, so it saves
+the callback bodies alone — the walk, the UTF-8
 validation and the chunk bookkeeping are the decode, and a router that
 materializes nothing pays essentially full price.
