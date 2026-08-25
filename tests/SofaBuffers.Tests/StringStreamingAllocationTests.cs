@@ -78,23 +78,24 @@ public class StringStreamingAllocationTests
         Assert.True(payload > 1_000_000);
 
         var sink = new CountingSink();
-        var os = new OStream(new byte[16], 0, sink.Write);
+        FlushSink write = sink.Write;
 
-        // Warm up the JIT and any one-time per-stream state, so the measured
-        // window contains nothing but the encode itself.
-        os.WriteString(7, BigMixedText(4));
-        os.Flush();
+        // Warm up the JIT on a SEPARATE encoder. Warming up on the instance that is
+        // about to be measured would perform any one-time per-stream allocation
+        // inside the warm-up window and hide it (CORELIB_PLAN §6.6.4) - which is
+        // what this test used to do, and why it read `< 64 KiB` instead of zero.
+        var warm = new OStream(new byte[16], 0, write);
+        warm.WriteString(7, BigMixedText(4));
+        warm.Flush();
         sink.Bytes = 0;
 
+        var os = new OStream(new byte[16], 0, write);
         long before = GC.GetAllocatedBytesForCurrentThread();
         os.WriteString(7, text);
         long allocated = GC.GetAllocatedBytesForCurrentThread() - before;
         os.Flush();
 
-        Assert.True(
-            allocated < 64 * 1024,
-            $"WriteString allocated {allocated} bytes for a {payload}-byte payload; " +
-            "the buffer, not the message, must bound memory (CORELIB_PLAN §5.1)");
+        Assert.Equal(0, allocated);
         // Everything reached the sink: the payload plus the id byte and the
         // fixlen_word varint in front of it.
         Assert.InRange(sink.Bytes - payload, 2, 16);
@@ -109,8 +110,16 @@ public class StringStreamingAllocationTests
     public void SinklessBufferFullDoesNotAllocateThePayload()
     {
         string text = BigMixedText(50_000);
+
+        // Warm-up on a separate encoder, for the reason given above; the throw
+        // itself allocates the exception object, so the measured window here can
+        // only be bounded, not zero.
+        var warm = new OStream(new byte[64]);
+        warm.WriteUnsigned(1, 1);
+        Assert.Throws<SofabException>(() => warm.WriteString(7, text));
+
         var os = new OStream(new byte[64]);
-        os.WriteUnsigned(1, 1);                      // warm up the write paths
+        os.WriteUnsigned(1, 1);
 
         long before = GC.GetAllocatedBytesForCurrentThread();
         var ex = Assert.Throws<SofabException>(() => os.WriteString(7, text));
@@ -118,7 +127,7 @@ public class StringStreamingAllocationTests
 
         Assert.Equal(SofabError.BufferFull, ex.Error);
         Assert.True(
-            allocated < 64 * 1024,
+            allocated < 4 * 1024,
             $"a rejected WriteString allocated {allocated} bytes before reporting BufferFull");
     }
 
