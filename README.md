@@ -64,6 +64,10 @@ dotnet add package SofaBuffers.Corelib
 | Reserve-offset | `new OStream(buf, offset)` leaves room at the front for a lower-layer header, saving a copy. |
 | Explicit endianness | IEEE-754 values are read / written explicitly little-endian, identical on every runtime. |
 | Generated-code friendly | `IVisitor` has a default no-op for every field kind, so sinks override only what they need. |
+| Zero unnecessary copies | A `string` / `blob` payload reaches the visitor as a range of the array you fed; the encoder writes straight into your buffer. |
+| Small footprint | No dependencies beyond the BCL; the codec's state is two objects, and its size is fixed at construction. |
+| Type safety | One typed write per field kind and one typed callback per field kind; no `object`, no reflection, no boxing. |
+| Cross-language compatibility | The wire format is `MESSAGE_SPEC.md`; the shared vectors in `assets/` are replayed by the suite in both directions. |
 
 ## Usage
 
@@ -419,7 +423,10 @@ of the bytes stays with the caller.
   straight into it and never allocates or grows it. Full with no sink → the next
   write throws `SofabError.BufferFull`. With a `FlushSink`, the full buffer is handed
   to the sink and writing resumes at the *start* of the same array (so a message can
-  exceed the buffer, even RAM). The sink's array is the encoder's live buffer,
+  exceed the buffer, even RAM). **A sink is only ever handed memory inside the
+  installed buffer** — never a caller's array passed straight through, whatever its
+  size (CORELIB_PLAN §5.1.6) — so there is no second case for a sink to handle.
+  The sink's array is the encoder's live buffer,
   reused after the call returns, so a sink that retains bytes must copy them —
   unless it **takes** the buffer, in which case it must install a replacement with
   `BufferSet(buffer, offset)` before returning; the encoder then resumes at *that
@@ -429,8 +436,9 @@ of the bytes stays with the caller.
 - **No payload-sized temporaries.** `string` is the one payload that has to be
   *transcoded* rather than copied, and it allocates nothing either: when the value
   is longer than the room left in the buffer, `WriteString` transcodes it in pieces
-  straight into that room — carrying a split surrogate pair across the flush with a
-  stateful encoder — instead of materializing the UTF-8 bytes first (CORELIB_PLAN
+  straight into that room — stopping each piece on a whole Unicode scalar value, so
+  a surrogate pair is carried across the flush rather than cut — instead of
+  materializing the UTF-8 bytes first (CORELIB_PLAN
   §5.1: the payload run of a `string` is *divisible* at any byte boundary). The
   buffer, not the message, bounds peak memory: a 64 MB string streams through a
   16-byte buffer in 16-byte pieces. Output bytes are identical either way.
@@ -445,11 +453,27 @@ of the bytes stays with the caller.
   a message sized from a bounded schema's `MaxSize` fits exactly — a two-byte
   message encodes into a two-byte buffer — and anything larger reports
   `SofabError.BufferFull`.
-- **Decode (`IStream` + `IVisitor`).** The `byte[]` you `Feed` is aliased, not
-  copied: `String` / `Blob` chunks point directly into it (`data[chunkOffset ..
-  chunkOffset+chunkLength)`) and are valid only for the duration of the callback.
-  Scalars and floats are passed by value (no boxing). A visitor that retains bytes
-  must copy the chunk.
+- **Decode (`IStream` + `IVisitor`).** The `byte[]` you `Feed` is yours and is
+  borrowed only for the duration of the call: `String` / `Blob` chunks are handed
+  back as a range of it (`data[chunkOffset .. chunkOffset+chunkLength)`), valid
+  **only until the callback returns** — a visitor that keeps the value copies it
+  first. That holds on the one-shot `Feed(data, visitor)` exactly as on a chunked
+  one; there is no value you may read after the call that delivered it, and no
+  payload position to index later. Scalars and floats are passed by value (no
+  boxing).
+- **No wire value decides an allocation in the codec.** Nothing a peer can send
+  makes `OStream` or `IStream` take memory: their state is fixed-size and is sized
+  when they are constructed, and after that neither `Write*`, `Feed` nor `Flush`
+  allocates at all (CORELIB_PLAN §6.6, measured by `CodecAllocationTests`). In
+  particular there is **no library-owned accumulator** for a field that straddles a
+  chunk: a split payload is delivered piece by piece and reassembled by whoever
+  wants the whole value, in storage that caller owns.
+- **The support layer allocates; the codec does not.** `Seq`, `PayloadAcc` and
+  `Utf8` (see *Generated-code support layer*) do take memory — arrays that grow as
+  elements arrive, a reassembly buffer, a materialized `string`. They are the
+  **generated layer's** code, kept here so it need not be emitted into every
+  generated source tree, and no codec path calls them (CORELIB_PLAN §6.6.1). Read
+  their buffers as the caller's, not as the codec's.
 
 ## Build & test
 
