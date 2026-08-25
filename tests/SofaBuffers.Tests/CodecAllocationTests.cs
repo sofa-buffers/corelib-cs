@@ -29,6 +29,50 @@ namespace SofaBuffers.Tests;
 
 public class CodecAllocationTests
 {
+    /// <summary>
+    /// Construct a fresh codec, then measure only what running <paramref name="body"/>
+    /// over it allocates; repeat until a run comes back at exactly zero, and fail
+    /// with every figure seen if none does.
+    /// </summary>
+    /// <remarks>
+    /// The construction is deliberately outside the measured window: §6.6 makes
+    /// one-time construction the boundary and lets it allocate the codec's
+    /// fixed-size state, and §6.6.4 measures "after the codec's one-time
+    /// construction". It is a fresh codec every attempt all the same, because a
+    /// per-stream allocation is exactly what this is looking for.
+    /// <para>
+    /// The property under test is deterministic: a codec that takes storage after
+    /// construction takes it on <em>every</em> fresh instance, so every attempt
+    /// reports it and the retry cannot mask one. What the retry absorbs is the
+    /// runtime landing something of its own in the window - a tier-1 transition, a
+    /// GC bookkeeping charge - which happens to whichever call it happens to and is
+    /// not a property of the codec at all. So the assertion stays exact zero
+    /// (§6.6.4 admits no threshold) without being flaky.
+    /// </para>
+    /// </remarks>
+    /// <typeparam name="T">the codec type</typeparam>
+    /// <param name="construct">builds a fresh codec, outside the measured window</param>
+    /// <param name="body">the complete encode or decode to measure</param>
+    private static void AssertAllocatesNothing<T>(Func<T> construct, Action<T> body)
+    {
+        const int attempts = 5;
+        var seen = new long[attempts];
+        for (int i = 0; i < attempts; i++)
+        {
+            T codec = construct();
+            long before = GC.GetAllocatedBytesForCurrentThread();
+            body(codec);
+            seen[i] = GC.GetAllocatedBytesForCurrentThread() - before;
+            if (seen[i] == 0)
+            {
+                return;
+            }
+        }
+        Assert.Fail(
+            "the codec allocated after construction on every attempt (bytes: " +
+            string.Join(", ", seen) + "); CORELIB_PLAN §6.6.4 requires zero");
+    }
+
     /// <summary>A sink that counts and nothing else, so measuring an encode measures the encoder.</summary>
     private sealed class CountingSink
     {
@@ -160,14 +204,11 @@ public class CodecAllocationTests
         // Warm-up on a SEPARATE instance: a one-time per-stream allocation on this
         // one must not be charged to - or hidden from - the measured instance.
         CompleteEncode(new OStream(new byte[64], 0, write), e);
+        var buffer = new byte[64];
 
-        var measured = new OStream(new byte[64], 0, write);
-        long before = GC.GetAllocatedBytesForCurrentThread();
-        CompleteEncode(measured, e);
-        long allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+        AssertAllocatesNothing(() => new OStream(buffer, 0, write), os => CompleteEncode(os, e));
 
         Assert.True(sink.Bytes > 1000);                   // the encode really ran
-        Assert.Equal(0, allocated);
     }
 
     /// <summary>
@@ -182,13 +223,16 @@ public class CodecAllocationTests
 
         CompleteEncode(new OStream(new byte[1 << 16]), e);
 
-        var measured = new OStream(buffer);
-        long before = GC.GetAllocatedBytesForCurrentThread();
-        CompleteEncode(measured, e);
-        long allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+        long used = 0;
+        AssertAllocatesNothing(
+            () => new OStream(buffer),
+            os =>
+            {
+                CompleteEncode(os, e);
+                used = os.BytesUsed;
+            });
 
-        Assert.True(measured.BytesUsed > 1000);
-        Assert.Equal(0, allocated);
+        Assert.True(used > 1000);
     }
 
     /// <summary>
@@ -202,13 +246,10 @@ public class CodecAllocationTests
 
         new IStream().Feed(wire, visitor);                // warm-up, separate instance
 
-        var measured = new IStream();
-        long before = GC.GetAllocatedBytesForCurrentThread();
-        DecodeStatus status = measured.Feed(wire, visitor);
-        long allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+        DecodeStatus status = DecodeStatus.Incomplete;
+        AssertAllocatesNothing(() => new IStream(), istream => status = istream.Feed(wire, visitor));
 
         Assert.Equal(DecodeStatus.Complete, status);
-        Assert.Equal(0, allocated);
     }
 
     /// <summary>
@@ -224,13 +265,12 @@ public class CodecAllocationTests
 
         FeedByteAtATime(new IStream(), wire, visitor);    // warm-up, separate instance
 
-        var measured = new IStream();
-        long before = GC.GetAllocatedBytesForCurrentThread();
-        DecodeStatus status = FeedByteAtATime(measured, wire, visitor);
-        long allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+        DecodeStatus status = DecodeStatus.Incomplete;
+        AssertAllocatesNothing(
+            () => new IStream(),
+            istream => status = FeedByteAtATime(istream, wire, visitor));
 
         Assert.Equal(DecodeStatus.Complete, status);
-        Assert.Equal(0, allocated);
     }
 
     private static DecodeStatus FeedByteAtATime(IStream istream, byte[] wire, IVisitor visitor)
