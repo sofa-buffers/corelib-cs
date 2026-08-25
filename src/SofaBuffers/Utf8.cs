@@ -5,6 +5,7 @@
  * SPDX-License-Identifier: MIT
  */
 
+using System;
 using System.Text;
 
 namespace sofab;
@@ -100,4 +101,29 @@ public static class Utf8
             throw new SofabException(SofabError.InvalidMessage, "string: invalid UTF-8");
         }
     }
+
+    /// <summary>
+    /// Report whether <c>data[offset, offset + length)</c> is well-formed UTF-8,
+    /// without materializing anything.
+    /// </summary>
+    /// <remarks>
+    /// The verdict is the one <see cref="Decode"/> applies, and the same one
+    /// <see cref="OStream.WriteFixlen"/> applies on the way out: the Unicode scalar
+    /// encoding and nothing else — no overlongs, no encoded surrogates, nothing
+    /// above <c>U+10FFFF</c>, no truncated or stray sequence.
+    /// <para>
+    /// This is what a <b>byte container</b> needs. Where a schema's <c>string</c>
+    /// field is carried as raw bytes rather than as a C# <see cref="string"/>,
+    /// generated code has a value that can hold invalid UTF-8, and MESSAGE_SPEC §8
+    /// forbids emitting it (CORELIB_PLAN §6.4.1: encode-side validation is what
+    /// keeps a strict ecosystem's own encoders from producing bytes its decoders
+    /// reject). Checking it costs one vectorized pass and allocates nothing.
+    /// </para>
+    /// </remarks>
+    /// <param name="data">buffer holding the bytes</param>
+    /// <param name="offset">first byte within <paramref name="data"/></param>
+    /// <param name="length">number of bytes</param>
+    /// <returns><c>true</c> if the range is valid UTF-8</returns>
+    public static bool IsValid(byte[] data, int offset, int length) =>
+        System.Text.Unicode.Utf8.IsValid(new ReadOnlySpan<byte>(data, offset, length));
 }

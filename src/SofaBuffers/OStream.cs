@@ -69,46 +69,36 @@ public sealed class OStream
     /// <see cref="WriteSequenceEnd"/> can simply pop the last entry.
     /// </summary>
     /// <remarks>
-    /// The run is <b>unbounded</b>: CORELIB_PLAN §6 requires an implementation that
-    /// can allocate to hold back to the full <c>MAX_DEPTH</c>, so this encoder is
-    /// canonical at every depth the format permits. Only a heap-free profile may
-    /// bound the run and frame eagerly past the bound; C# is not one, so there is
-    /// no eager fallback and no depth constant to configure.
+    /// The run reaches the full <c>MAX_DEPTH</c> (255), so this encoder is canonical
+    /// at every depth the format permits and there is no eager fallback path.
     /// <para>
-    /// Spill storage only: the first <see cref="InlinePendingCapacity"/> ids live
-    /// in <see cref="_inlinePending"/>, inside the encoder, so nesting that shallow
-    /// — and an encoder that never opens a sequence at all — allocates nothing.
-    /// This array appears only past that depth and grows by doubling;
-    /// <c>MAX_DEPTH</c> caps it at 255 entries in total.
+    /// It is <b>fixed-size state, sized once</b>: the storage lives inside the
+    /// encoder object and is laid down when the encoder is constructed, never on a
+    /// <c>write</c> path. CORELIB_PLAN §6.6 permits exactly this — state a constant
+    /// of that document caps, sized at construction — and forbids the run that grows
+    /// as nesting deepens, which allocates while a message is being written. 1020
+    /// bytes per encoder is what <c>MAX_DEPTH</c> ids cost.
+    /// </para>
+    /// <para>
+    /// Inside the encoder rather than beside it: of the shapes that satisfy the
+    /// clause, this one measured cheapest per encode under <c>bench/run_callgrind.sh</c>
+    /// — one allocation instead of two, and no indirection on the commit loop. A
+    /// separate <c>int[MAX_DEPTH]</c> costs slightly more; asking the runtime for
+    /// uninitialized storage large enough to skip the zero-fill costs considerably
+    /// more.
     /// </para>
     /// </remarks>
-    private int[]? _pending;
+    private PendingIds _pending;
 
-    /// <summary>
-    /// The first <see cref="InlinePendingCapacity"/> held-back ids, stored in the
-    /// encoder itself so that the common shallow nesting holds a sequence back
-    /// without allocating anything; <see cref="_pending"/> takes over beyond that.
-    /// </summary>
-    private PendingIds _inlinePending;
-
-    /// <summary>Number of valid held-back ids (inline entries first, then <see cref="_pending"/>).</summary>
+    /// <summary>Number of valid held-back ids, at the front of <see cref="_pending"/>.</summary>
     private int _nPending;
 
     /// <summary>
-    /// Held-back ids kept inline in the encoder. Nesting deeper than this spills
-    /// to <see cref="_pending"/>, which grows on demand; real schemas rarely reach
-    /// even this depth.
+    /// Inline storage for the held-back ids: one entry per nesting level the format
+    /// allows (<c>MAX_DEPTH</c>), so <see cref="WriteSequenceBeginLazy"/> can never
+    /// need a larger one.
     /// </summary>
-    private const int InlinePendingCapacity = 4;
-
-    /// <summary>
-    /// Entries the spill array allocates the first time nesting exceeds
-    /// <see cref="InlinePendingCapacity"/>. Deeper nesting doubles it.
-    /// </summary>
-    private const int InitialPendingCapacity = 8;
-
-    /// <summary>Inline storage for the first <see cref="InlinePendingCapacity"/> held-back ids.</summary>
-    [InlineArray(InlinePendingCapacity)]
+    [InlineArray(MAX_DEPTH)]
     private struct PendingIds
     {
         private int _first;
@@ -137,16 +127,6 @@ public sealed class OStream
     private const int MaxUtf8BytesPerRune = 4;
 
     private readonly FlushSink? _sink;
-
-    /// <summary>
-    /// Stateful UTF-8 encoder used by <see cref="PushTranscoded"/> to split a
-    /// string payload across flushes, created on first use and reused for the
-    /// life of this <see cref="OStream"/>. Its state (a pending high surrogate)
-    /// lives only within one <see cref="WriteString"/> call, which resets it
-    /// before use. <c>null</c> until a string actually spans the buffer, so the
-    /// common one-shot encode never pays for it.
-    /// </summary>
-    private Encoder? _utf8Encoder;
 
     /// <summary>
     /// Strict UTF-8 codec used for <see cref="WriteString"/>. Constructed with
@@ -573,7 +553,7 @@ public sealed class OStream
         _nPending = 0;
         for (int i = 0; i < n; i++)
         {
-            int id = i < InlinePendingCapacity ? _inlinePending[i] : _pending![i - InlinePendingCapacity];
+            int id = _pending[i];
             WriteVarint(((ulong)(uint)id << 3) | T_SEQUENCE_START);
         }
     }
@@ -698,6 +678,17 @@ public sealed class OStream
     /// <paramref name="length"/> is not exactly 4 / 8. Both make a malformed
     /// <c>fixlen_word</c> (CORELIB_PLAN §4.6), so the encoder rejects them rather than
     /// emit bytes its own decoder reports as <c>INVALID</c>.
+    /// <para>
+    /// Also <see cref="SofabError.Argument"/> when <paramref name="subtype"/> is
+    /// <see cref="FixlenType.String"/> and the byte range is not valid UTF-8. This is
+    /// the byte-container entry point for a <c>string</c> field — the one writer that
+    /// takes the payload as raw bytes rather than as a C# <c>string</c> — so it is
+    /// where MESSAGE_SPEC §8's producer-side "MUST NOT emit invalid UTF-8" is enforced
+    /// (CORELIB_PLAN §6.4.1). Without it this library's encoder could emit a
+    /// <c>string</c> field its own <see cref="Utf8.Decode"/> rejects. The refusal is
+    /// atomic: it happens before any byte, and before any held-back sequence header,
+    /// reaches the buffer.
+    /// </para>
     /// </exception>
     public void WriteFixlen(int id, byte[] data, int from, int length, FixlenType subtype)
     {
@@ -713,6 +704,11 @@ public sealed class OStream
         {
             throw new SofabException(
                 SofabError.Argument, "fixlen length " + length + " for " + subtype);
+        }
+        if (subtype == FixlenType.String && length > 0 &&
+            !System.Text.Unicode.Utf8.IsValid(new ReadOnlySpan<byte>(data, from, length)))
+        {
+            throw new SofabException(SofabError.Argument, "string: invalid UTF-8");
         }
         if (id < 0)
         {
@@ -1002,20 +998,21 @@ public sealed class OStream
     /// payload-sized gen0 allocation on the hot path, triggered by nothing more
     /// than an unlucky buffer position.
     /// <para>
-    /// A stateful <see cref="Encoder"/> is what makes the split legal: it carries
-    /// a surrogate pair whose halves land on either side of a chunk boundary, so
-    /// the pieces concatenate to exactly the one-shot bytes. It is created once
-    /// per <see cref="OStream"/> and reset per call, so repeated large strings
-    /// cost nothing after the first.
+    /// The split is legal because the transcoder stops on a whole scalar value: a
+    /// surrogate pair whose halves would land on either side of a chunk boundary is
+    /// carried to the next piece instead of being cut, so the pieces concatenate to
+    /// exactly the one-shot bytes. No encoder state is kept between pieces and none
+    /// is allocated — the transcode is a stateless call over what is left of the
+    /// string (CORELIB_PLAN §6.6: nothing after construction allocates).
     /// </para>
     /// <para>
-    /// Two chunk sizes: while the buffer has room for a whole rune the encoder
+    /// Two chunk sizes: while the buffer has room for a whole rune the transcoder
     /// writes in place, and once fewer than <see cref="MaxUtf8BytesPerRune"/>
     /// bytes are left it transcodes one rune into a stack scratch and pushes it
     /// byte-wise across the flush. That second path is what lets a UTF-8 sequence
-    /// itself straddle a flush, which <c>MIN_OUTPUT_BUFFER == 1</c> requires:
-    /// <see cref="Encoder"/>.<c>Convert</c> cannot emit a partial rune, so it is
-    /// never handed a destination too small to hold one.
+    /// itself straddle a flush, which <c>MIN_OUTPUT_BUFFER == 1</c> requires: the
+    /// transcoder cannot emit a partial rune, so it is never handed a destination
+    /// too small to hold one.
     /// </para>
     /// <para>
     /// The caller has already run <see cref="Encoding.GetByteCount(string)"/>
@@ -1029,9 +1026,6 @@ public sealed class OStream
     /// <param name="text">the (already validated) string value</param>
     private void PushTranscoded(string text)
     {
-        Encoder encoder = _utf8Encoder ??= StrictUtf8.GetEncoder();
-        encoder.Reset();
-
         Span<byte> rune = stackalloc byte[MaxUtf8BytesPerRune];
         int from = 0;
         int charsLeft = text.Length;
@@ -1050,26 +1044,31 @@ public sealed class OStream
             int charsUsed, bytesUsed;
             if (room >= MaxUtf8BytesPerRune)
             {
-                encoder.Convert(
+                // Fills the room the buffer has left, stopping on a whole rune:
+                // isFinalBlock false makes a trailing high surrogate the start of
+                // the next piece rather than an error, which is what carries a
+                // surrogate pair across a flush without any encoder state.
+                System.Text.Unicode.Utf8.FromUtf16(
                     text.AsSpan(from, charsLeft),
                     _buffer.AsSpan(_offset, room),
-                    flush: false,
                     out charsUsed,
                     out bytesUsed,
-                    out _);
+                    replaceInvalidSequences: false,
+                    isFinalBlock: false);
                 _offset += bytesUsed;
             }
             else
             {
                 // Tail too short for a whole rune: encode one into the scratch
                 // and let PushByte carry it over the flush boundary.
-                encoder.Convert(
-                    text.AsSpan(from, charsLeft),
+                charsUsed = RuneLengthAt(text, from);
+                System.Text.Unicode.Utf8.FromUtf16(
+                    text.AsSpan(from, charsUsed),
                     rune,
-                    flush: false,
-                    out charsUsed,
+                    out _,
                     out bytesUsed,
-                    out _);
+                    replaceInvalidSequences: false,
+                    isFinalBlock: true);
                 for (int i = 0; i < bytesUsed; i++)
                 {
                     PushByte(rune[i]);
@@ -1079,6 +1078,20 @@ public sealed class OStream
             charsLeft -= charsUsed;
         }
     }
+
+    /// <summary>
+    /// Number of <c>char</c>s the Unicode scalar value at <paramref name="from"/>
+    /// occupies: two for a surrogate pair, one otherwise.
+    /// </summary>
+    /// <remarks>
+    /// The whole string was measured with <see cref="Encoding.GetByteCount(string)"/>
+    /// before a byte of it was written, so it is known to hold no unpaired
+    /// surrogate and the pair is always complete.
+    /// </remarks>
+    /// <param name="text">the string being transcoded</param>
+    /// <param name="from">index of the first <c>char</c> of the scalar value</param>
+    private static int RuneLengthAt(string text, int from) =>
+        char.IsHighSurrogate(text[from]) && from + 1 < text.Length ? 2 : 1;
 
     /// <summary>Write a binary blob field.</summary>
     /// <param name="id">field id</param>
@@ -1669,11 +1682,12 @@ public sealed class OStream
     /// produces exactly the one-shot bytes.
     /// </para>
     /// <para>
-    /// The hold-back reaches the full <c>MAX_DEPTH</c> (255): the pending run grows
-    /// on demand, so this encoder emits the canonical §2 bytes at <i>every</i>
-    /// nesting depth the format allows. CORELIB_PLAN §6 permits a bounded run —
-    /// framing eagerly and non-canonically past the bound — only for a heap-free
-    /// profile, which C# is not.
+    /// The hold-back reaches the full <c>MAX_DEPTH</c> (255): the pending run is
+    /// sized for that at construction, so this encoder emits the canonical §2 bytes
+    /// at <i>every</i> nesting depth the format allows and no <c>write</c> path
+    /// allocates (CORELIB_PLAN §6.0.1, §6.6). A bounded run — framing eagerly and
+    /// non-canonically past the bound — is a constrained-profile allowance this port
+    /// does not take.
     /// </para>
     /// <para>
     /// This is the only way to open a sequence. How it closes decides whether a
@@ -1697,28 +1711,11 @@ public sealed class OStream
         {
             throw new SofabException(SofabError.Argument, "id " + id);
         }
-        // Grow on demand — the run reaches as deep as the nesting does, so there is
-        // no depth at which a sequence gets framed eagerly and no fallback path
-        // that could break "pending is a contiguous suffix of the open sequences".
-        // MAX_DEPTH above already caps this at 255 entries.
+        // The run is sized for MAX_DEPTH at construction, and the depth check above
+        // is what keeps it in range: every level the format allows already has its
+        // entry, so nothing is allocated or grown here (CORELIB_PLAN §6.6).
         int n = _nPending;
-        if (n < InlinePendingCapacity)
-        {
-            _inlinePending[n] = id;
-        }
-        else
-        {
-            int spill = n - InlinePendingCapacity;
-            if (_pending == null)
-            {
-                _pending = new int[InitialPendingCapacity];
-            }
-            else if (spill == _pending.Length)
-            {
-                Array.Resize(ref _pending, _pending.Length * 2);
-            }
-            _pending[spill] = id;
-        }
+        _pending[n] = id;
         _nPending = n + 1;
         _depth++;
     }

@@ -368,7 +368,9 @@ public class PayloadAccTests
         // generated code raises it. IStream latches it like its own verdicts: the
         // stream is Invalid and stays Invalid (§5.2).
         byte[] payload = Utf8Bytes("hello ").Concat(Bytes(0xED, 0xA0, 0x80)).ToArray();
-        byte[] wire = Encode(os => os.WriteFixlen(1, payload, 0, payload.Length, FixlenType.String));
+        // Assembled by hand: the encoder refuses an invalid UTF-8 string payload
+        // (§6.4.1), and this test needs a message that carries one.
+        byte[] wire = RawStringField(1, payload);
 
         var iss = new IStream();
         var visitor = new StringFieldVisitor();

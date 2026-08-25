@@ -33,6 +33,9 @@ public class FlushInstallationTests
         return buf[..os.BytesUsed];
     }
 
+    /// <summary>Fill byte a taking sink leaves in the buffer it was handed.</summary>
+    private const byte Scrub = 0xAB;
+
     /// <summary>Concatenate the payload of every packet, skipping each one's reserved prefix.</summary>
     private static byte[] Payload(List<byte[]> packets, int prefix)
     {
@@ -65,8 +68,11 @@ public class FlushInstallationTests
         FlushSink sink = (data, offset, length) =>
         {
             packets.Add(data[offset..(offset + length)]);
-            // Taking sink: `data` now belongs to the transport; install the other
-            // buffer, re-arming the framing-header reservation.
+            // Taking sink: `data` now belongs to the transport, so scrub what it
+            // was handed before returning (CORELIB_PLAN §7.2 item 4). An encoder
+            // that kept writing into the buffer it gave away reads the fill pattern
+            // back, and the packet comparison below sees it.
+            data.AsSpan(offset, length).Fill(Scrub);
             byte[] next = ReferenceEquals(data, a) ? b : a;
             next.AsSpan().Fill(Reserved);
             os!.BufferSet(next, HeaderRoom);

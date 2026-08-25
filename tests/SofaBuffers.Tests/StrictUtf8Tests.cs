@@ -216,6 +216,63 @@ public class StrictUtf8Tests
         Assert.Equal(0, os.BytesUsed);
     }
 
+    [Theory]
+    [MemberData(nameof(InvalidUtf8Names))]
+    public void InvalidUtf8ByteContainerEncodeRejects(string name)
+    {
+        // encode_outcome:"invalid_argument", for EVERY vector rather than only the
+        // two a C# `string` can hold. WriteFixlen(..., FixlenType.String) is the
+        // byte-container preimage the note on
+        // InvalidUtf8EncodeRejectsWhereRepresentable is about: it takes the payload
+        // as raw bytes, so the overlong, out-of-range and stray-byte vectors all
+        // reach it. §6.4.1 makes encode-side validation what enforces MESSAGE_SPEC
+        // §8's producer-side MUST NOT -- without it this library emits a `string`
+        // field its own Utf8.Decode rejects.
+        InvalidVec v = Vec(name);
+        var os = new OStream(new byte[64]);
+        os.WriteUnsigned(1, 7);
+        int used = os.BytesUsed;
+
+        var ex = Assert.Throws<SofabException>(
+            () => os.WriteFixlen(2, v.StringHex, 0, v.StringHex.Length, FixlenType.String));
+
+        Assert.Equal(SofabError.Argument, ex.Error);
+        // Atomic: not one byte of the refused field reached the buffer.
+        Assert.Equal(used, os.BytesUsed);
+    }
+
+    [Fact]
+    public void AByteContainerRefusalDropsNoHeldBackSequenceHeader()
+    {
+        // The refusal happens before the held-back sequence headers are committed,
+        // so a sequence that has still written nothing stays droppable and the
+        // stream ends up exactly as it started (CORELIB_PLAN §6.0.1, §6.4).
+        var buf = new byte[64];
+        var os = new OStream(buf);
+        os.WriteSequenceBeginLazy(3);
+        Assert.Throws<SofabException>(
+            () => os.WriteFixlen(1, new byte[] { 0xC0, 0x80 }, 0, 2, FixlenType.String));
+        os.WriteSequenceEnd();
+
+        Assert.Equal(0, os.BytesUsed);
+    }
+
+    [Fact]
+    public void ValidUtf8ThroughTheByteContainerStillEncodes()
+    {
+        // The control: the same writer with well-formed bytes is untouched, and the
+        // decoder materializes exactly what went in.
+        byte[] payload = Encoding.UTF8.GetBytes("héllo \U0001F600");
+        var buf = new byte[64];
+        var os = new OStream(buf);
+        os.WriteFixlen(2, payload, 0, payload.Length, FixlenType.String);
+
+        var visitor = new StringVisitor();
+        Assert.Equal(DecodeStatus.Complete, new IStream().Feed(buf[..os.BytesUsed], visitor));
+        Assert.Equal(payload, visitor.Strings[0].Bytes);
+        Assert.Equal("héllo \U0001F600", Utf8.Decode(payload, 0, payload.Length));
+    }
+
     [Fact]
     public void AtLeastOneVectorDrivesEncodeReject()
     {

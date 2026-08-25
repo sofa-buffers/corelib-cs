@@ -16,6 +16,7 @@
  * SPDX-License-Identifier: MIT
  */
 
+using System;
 using System.Text;
 using Xunit;
 using static SofaBuffers.Tests.Common.TestBytes;
@@ -121,5 +122,54 @@ public class Utf8DecodeTests
         // data, and carries no terminator meaning (MESSAGE_SPEC §7).
         byte[] payload = Bytes(0x61, 0x00, 0x62);
         Assert.Equal("a\0b", Utf8.Decode(payload, 0, payload.Length));
+    }
+
+    [Fact]
+    public void IsValidAgreesWithDecodeOnEveryRange()
+    {
+        // The byte-container check (CORELIB_PLAN §6.4.1) must give exactly the
+        // verdict Decode gives, or a value would pass on the way out and be
+        // rejected on the way back in.
+        byte[][] valid =
+        {
+            Array.Empty<byte>(),
+            Encoding.UTF8.GetBytes("hello"),
+            Encoding.UTF8.GetBytes("héllo \U0001F600"),
+            Bytes(0x61, 0x00, 0x62),                     // embedded NUL
+            Bytes(0xEF, 0xBF, 0xBD),                     // a genuine U+FFFD
+        };
+        byte[][] invalid =
+        {
+            Bytes(0xC0, 0x80),                           // overlong NUL
+            Bytes(0xFF),                                 // begins nothing
+            Bytes(0xED, 0xA0, 0x80),                     // encoded surrogate
+            Bytes(0xF4, 0x90, 0x80, 0x80),               // above U+10FFFF
+            Bytes(0xE2, 0x82),                           // truncated sequence
+            Bytes(0x80),                                 // stray continuation
+        };
+
+        foreach (byte[] p in valid)
+        {
+            Assert.True(Utf8.IsValid(p, 0, p.Length), Convert.ToHexString(p));
+            Utf8.Decode(p, 0, p.Length);                 // does not throw
+        }
+        foreach (byte[] p in invalid)
+        {
+            Assert.False(Utf8.IsValid(p, 0, p.Length), Convert.ToHexString(p));
+            Assert.Throws<SofabException>(() => Utf8.Decode(p, 0, p.Length));
+        }
+    }
+
+    [Fact]
+    public void IsValidJudgesOnlyTheNamedRange()
+    {
+        // Only [offset, offset+length) is inspected: a chunk carrying the payload
+        // plus whatever came after it is judged on the payload alone, exactly as
+        // Decode is.
+        byte[] data = Bytes(0xFF, 0x61, 0x62, 0xC0);
+        Assert.True(Utf8.IsValid(data, 1, 2));
+        Assert.False(Utf8.IsValid(data, 0, 3));
+        Assert.False(Utf8.IsValid(data, 1, 3));
+        Assert.True(Utf8.IsValid(data, 2, 0));
     }
 }
