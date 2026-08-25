@@ -79,6 +79,14 @@ public sealed class OStream
     /// as nesting deepens, which allocates while a message is being written. 1020
     /// bytes per encoder is what <c>MAX_DEPTH</c> ids cost.
     /// </para>
+    /// <para>
+    /// Inside the encoder rather than beside it: of the shapes that satisfy the
+    /// clause, this one measured cheapest per encode under <c>bench/run_callgrind.sh</c>
+    /// — one allocation instead of two, and no indirection on the commit loop. A
+    /// separate <c>int[MAX_DEPTH]</c> costs slightly more; asking the runtime for
+    /// uninitialized storage large enough to skip the zero-fill costs considerably
+    /// more.
+    /// </para>
     /// </remarks>
     private PendingIds _pending;
 
