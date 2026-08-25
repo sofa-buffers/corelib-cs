@@ -670,6 +670,17 @@ public sealed class OStream
     /// <paramref name="length"/> is not exactly 4 / 8. Both make a malformed
     /// <c>fixlen_word</c> (CORELIB_PLAN §4.6), so the encoder rejects them rather than
     /// emit bytes its own decoder reports as <c>INVALID</c>.
+    /// <para>
+    /// Also <see cref="SofabError.Argument"/> when <paramref name="subtype"/> is
+    /// <see cref="FixlenType.String"/> and the byte range is not valid UTF-8. This is
+    /// the byte-container entry point for a <c>string</c> field — the one writer that
+    /// takes the payload as raw bytes rather than as a C# <c>string</c> — so it is
+    /// where MESSAGE_SPEC §8's producer-side "MUST NOT emit invalid UTF-8" is enforced
+    /// (CORELIB_PLAN §6.4.1). Without it this library's encoder could emit a
+    /// <c>string</c> field its own <see cref="Utf8.Decode"/> rejects. The refusal is
+    /// atomic: it happens before any byte, and before any held-back sequence header,
+    /// reaches the buffer.
+    /// </para>
     /// </exception>
     public void WriteFixlen(int id, byte[] data, int from, int length, FixlenType subtype)
     {
@@ -685,6 +696,11 @@ public sealed class OStream
         {
             throw new SofabException(
                 SofabError.Argument, "fixlen length " + length + " for " + subtype);
+        }
+        if (subtype == FixlenType.String && length > 0 &&
+            !System.Text.Unicode.Utf8.IsValid(new ReadOnlySpan<byte>(data, from, length)))
+        {
+            throw new SofabException(SofabError.Argument, "string: invalid UTF-8");
         }
         if (id < 0)
         {

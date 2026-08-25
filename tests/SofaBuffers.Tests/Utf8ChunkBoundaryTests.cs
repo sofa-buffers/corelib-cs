@@ -59,12 +59,12 @@ public class Utf8ChunkBoundaryTests
 
     /// <summary>Wire message: one string field, id 1, carrying <paramref name="payload"/> verbatim.</summary>
     /// <remarks>
-    /// Built with the raw <c>WriteFixlen</c> escape hatch rather than
-    /// <c>WriteString</c>, because the whole point is a payload no C# string can
-    /// hold -- <c>WriteString</c> would (correctly, §6.4) refuse it.
+    /// Assembled by hand rather than by the encoder, because the whole point is a
+    /// payload no C# string can hold: <c>WriteString</c> refuses it, and so does
+    /// <c>WriteFixlen(..., FixlenType.String)</c> (correctly, §6.4.1). The framing
+    /// is ordinary and legal; only the payload is malformed.
     /// </remarks>
-    private static byte[] StringMessage(byte[] payload) =>
-        Encode(payload.Length + 32, os => os.WriteFixlen(1, payload, 0, payload.Length, FixlenType.String));
+    private static byte[] StringMessage(byte[] payload) => RawStringField(1, payload);
 
     // --- the models of generated code --------------------------------------
 
