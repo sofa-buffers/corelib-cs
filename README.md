@@ -397,7 +397,7 @@ here rather than being emitted into every generated source tree.
 |---|---|
 | `Seq.EnsureCap<T>(array, index, cap)` | the array-growth policy: double, stop at the announced count, and never allocate from a count the wire claimed but has not delivered |
 | `Seq.ArrayInitCap` | the bounded first reservation for an array the schema does not bound (16 elements) |
-| `PayloadAcc` | reassembles a `string` / `blob` payload split across `Feed` calls — a payload that arrives whole never touches its buffer, and the value never depends on where the split fell |
+| `PayloadAcc` | reassembles a `string` / `blob` payload split across `Feed` calls — a payload that arrives whole never touches its buffer, and the value never depends on where the split fell; takes the receiver cap for the field and checks the announced length against it before taking a byte |
 | `Utf8.Decode(data, offset, length)` | validate a byte range and materialize it, in that order — the only order in which invalid UTF-8 can still be rejected (§6.4) |
 
 ```csharp
@@ -405,7 +405,8 @@ private readonly PayloadAcc _acc = new();
 
 public void String(int id, int total, int offset, byte[] data, int co, int cl)
 {
-    string? s = _acc.String(total, offset, data, co, cl);   // null: more to come
+    // MaxDynStringLen is generated code's number; this library holds none.
+    string? s = _acc.String(total, offset, data, co, cl, MaxDynStringLen);
     if (s is not null) { /* route s to its field */ }
 }
 ```
@@ -413,6 +414,40 @@ public void String(int id, int total, int offset, byte[] data, int co, int cl)
 These are ordinary public API, usable directly. The encode scratch buffer stays
 with the caller either way — it is generated, never allocated here
 (CORELIB_PLAN §5.1).
+
+### Receiver caps: passed in, never held
+
+A field the schema leaves unbounded is still bounded by the receiver
+(CORELIB_PLAN §6.2.1). This library **holds no such limit**: no field, no default
+argument, no fallback constant, and no omitted argument that means *unlimited*.
+The numbers are generated code's, chosen per language and per deployment.
+
+What it does is run the comparison where §6.2.1 puts it — at the length header,
+before the allocation the cap exists to prevent, and behind the MESSAGE_SPEC §7.3
+tag test, since a skipped field is never capped:
+
+| cap | checked | where |
+|---|---|---|
+| `max_dyn_string_len` | `total` in `PayloadAcc.String(..., cap)` | here — the call generated code already makes for every string |
+| `max_dyn_blob_len` | `total` in `PayloadAcc.Blob(..., cap)` | here — likewise for every blob |
+| `max_dyn_array_count` | the announced count / the element index | **generated code** |
+
+The split is deliberate. A string or blob length arrives at a call this library
+already owns, so the compare folds in beside a bound test already there. An array
+has no such call — `Seq.EnsureCap` grows an array generated code owns and is not
+reached for every element — and inventing a `Reserve`/`Cap.Check` helper to host
+the check costs more than the inline guard it would replace. §6.2.1's *"one
+implementation, wherever it runs"* is satisfied either way: each rule is enforced
+in exactly one of the two layers, never both.
+
+The `cap` parameter is **required** — there is no unset state and no unlimited
+mode. A negative cap is a caller defect and raises `SofabError.Argument`, not
+`SofabError.LimitExceeded`, which would promise a limit to raise that was never
+configured (§6.3). Where the schema *does* bound a field, that bound governs and
+exceeding it is `InvalidMessage`: generated code rejects it at the same header and
+passes the same number on as `cap`, where it can no longer fire. A format ceiling
+(`ARRAY_MAX`, `FIXLEN_MAX`) is the format's bound, not a receiver cap, and reaching
+one stays `InvalidMessage` as it always was.
 
 ## Memory handling
 

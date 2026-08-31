@@ -6,6 +6,7 @@
  */
 
 using System;
+using System.Runtime.CompilerServices;
 
 namespace sofab;
 
@@ -28,7 +29,7 @@ namespace sofab;
 /// <code>
 /// public void String(int id, int total, int offset, byte[] data, int co, int cl)
 /// {
-///     string? s = _acc.String(total, offset, data, co, cl);
+///     string? s = _acc.String(total, offset, data, co, cl, MaxDynStringLen);
 ///     if (s is null)
 ///     {
 ///         return;                  // more chunks to come
@@ -43,12 +44,35 @@ namespace sofab;
 /// </para>
 /// <para>
 /// <b><c>total</c> is not an allocation.</b> The announced length is the wire's
-/// claim, bounded by nothing this class knows about, so the buffer grows by
-/// doubling against bytes that have actually arrived. A caller holding a schema
-/// <c>maxlen</c> or a receiver limit rejects an oversized <c>total</c> at
-/// <see cref="IVisitor.FixlenBegin"/>, before the first chunk reaches here
-/// (MESSAGE_SPEC §7.1); a caller holding neither still cannot be made to allocate
-/// more than the peer actually sent.
+/// claim, so the buffer grows by doubling against bytes that have actually
+/// arrived: even a payload nothing bounds cannot make this class allocate more
+/// than the peer really sent.
+/// </para>
+/// <para>
+/// <b>The cap is an argument, never a possession (CORELIB_PLAN §6.2.1).</b> Both
+/// methods take the <c>max_dyn_string_len</c> / <c>max_dyn_blob_len</c> the
+/// receiver configured and compare <c>total</c> against it before a byte is
+/// taken, at the length header, which is where §6.2.1 requires the check to run
+/// — ahead of the allocation it exists to prevent. The <em>number</em> stays
+/// generated code's: it is used for that one comparison and not retained, and
+/// this class holds no limit of its own, defaults none, reads no omitted
+/// argument as unlimited and clamps to nothing. Which is why the parameter is
+/// <b>required</b>: there is no unset state and no unlimited mode.
+/// </para>
+/// <para>
+/// <b>Behind the tag test, and only for a field that is read.</b> Generated code
+/// resolves the destination first (MESSAGE_SPEC §7.3: a field whose wire type
+/// contradicts the declared one is skipped, and a skipped field is never capped)
+/// and calls only for a payload it is actually materializing, so the check here
+/// already sits behind both conditions.
+/// </para>
+/// <para>
+/// <b>A schema-bounded field is not capped here.</b> Where the schema declares a
+/// <c>maxlen</c>, that bound governs and exceeding it is <c>InvalidMessage</c>,
+/// not <c>LimitExceeded</c> (MESSAGE_SPEC §7.1, CORELIB_PLAN §6.3). Generated
+/// code rejects it at the same header before calling and passes that same bound
+/// on, where it can no longer fire: this class is never the one to decide which
+/// of the two a field has.
 /// </para>
 /// <para>
 /// <b>No re-arming step.</b> Every payload's first chunk is reported at offset 0,
@@ -88,13 +112,30 @@ public sealed class PayloadAcc
     /// <param name="data">backing array containing the chunk</param>
     /// <param name="chunkOffset">start of the chunk within <paramref name="data"/></param>
     /// <param name="chunkLength">number of bytes in the chunk</param>
+    /// <param name="cap">
+    /// the receiver's <c>max_dyn_string_len</c> for this field, in bytes — the
+    /// caller's number, used for this one comparison and not retained (§6.2.1);
+    /// for a field the schema bounds, the schema <c>maxlen</c> the caller has
+    /// already enforced
+    /// </param>
     /// <returns>the completed string, or <c>null</c> while the payload is incomplete</returns>
     /// <exception cref="SofabException">
+    /// (<see cref="SofabError.LimitExceeded"/>) when <paramref name="total"/>
+    /// exceeds <paramref name="cap"/> — checked before a byte is taken;
+    /// (<see cref="SofabError.Argument"/>) when no cap was stated
+    /// (<paramref name="cap"/> is negative), a caller defect and never
+    /// <see cref="SofabError.LimitExceeded"/>, which would promise a limit to
+    /// raise that was never configured (§6.3);
     /// (<see cref="SofabError.InvalidMessage"/>) when the completed payload is not
     /// valid UTF-8.
     /// </exception>
-    public string? String(int total, int offset, byte[] data, int chunkOffset, int chunkLength)
+    public string? String(int total, int offset, byte[] data, int chunkOffset, int chunkLength, long cap)
     {
+        if (total > cap)
+        {
+            ThrowCap(total, cap, "max_dyn_string_len");
+        }
+
         if (offset == 0 && chunkLength >= total)
         {
             return Utf8.Decode(data, chunkOffset, total);
@@ -120,9 +161,26 @@ public sealed class PayloadAcc
     /// <param name="data">backing array containing the chunk</param>
     /// <param name="chunkOffset">start of the chunk within <paramref name="data"/></param>
     /// <param name="chunkLength">number of bytes in the chunk</param>
+    /// <param name="cap">
+    /// the receiver's <c>max_dyn_blob_len</c> for this field, in bytes — the
+    /// caller's number, used for this one comparison and not retained (§6.2.1);
+    /// for a field the schema bounds, the schema <c>maxlen</c> the caller has
+    /// already enforced
+    /// </param>
     /// <returns>the completed payload, or <c>null</c> while it is incomplete</returns>
-    public byte[]? Blob(int total, int offset, byte[] data, int chunkOffset, int chunkLength)
+    /// <exception cref="SofabException">
+    /// (<see cref="SofabError.LimitExceeded"/>) when <paramref name="total"/>
+    /// exceeds <paramref name="cap"/> — checked before a byte is taken;
+    /// (<see cref="SofabError.Argument"/>) when no cap was stated
+    /// (<paramref name="cap"/> is negative).
+    /// </exception>
+    public byte[]? Blob(int total, int offset, byte[] data, int chunkOffset, int chunkLength, long cap)
     {
+        if (total > cap)
+        {
+            ThrowCap(total, cap, "max_dyn_blob_len");
+        }
+
         if (offset == 0 && chunkLength >= total)
         {
             var whole = new byte[total];
@@ -140,6 +198,32 @@ public sealed class PayloadAcc
         Array.Copy(_buffer, 0, value, 0, total);
         return value;
     }
+
+    /// <summary>
+    /// Refuse a payload the receiver's cap does not admit — or a call that stated
+    /// no cap at all (CORELIB_PLAN §6.2.1, §6.3).
+    /// </summary>
+    /// <remarks>
+    /// Out of line and never inlined: the comparison at the call site is one
+    /// branch on a call generated code already makes, and the throw path carries
+    /// the message building.
+    /// <para>
+    /// The two categories are not interchangeable. An over-cap payload is a
+    /// <b>policy</b> rejection: the bytes are well-formed and the same message
+    /// decodes under a looser limit, so it is <see cref="SofabError.LimitExceeded"/>
+    /// and never <see cref="SofabError.InvalidMessage"/>. A negative
+    /// <paramref name="cap"/> is not a limit at all but a <b>caller defect</b> — a
+    /// number never stated, or a sentinel meant to read as "unlimited", which
+    /// §6.2.1 forbids this class to honour — so it is
+    /// <see cref="SofabError.Argument"/> (§6.3's <c>InvalidArgument</c>).
+    /// Reporting it as a limit would promise a limit to raise that nobody set.
+    /// </para>
+    /// </remarks>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static void ThrowCap(int total, long cap, string which) =>
+        throw (cap < 0
+            ? new SofabException(SofabError.Argument, which + " not stated (cap " + cap + ")")
+            : new SofabException(SofabError.LimitExceeded, which + " " + cap + " < " + total));
 
     /// <summary>
     /// Append a chunk, growing the buffer as bytes actually arrive.

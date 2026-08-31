@@ -28,6 +28,15 @@ namespace SofaBuffers.Tests;
 
 public class PayloadAccTests
 {
+    /// <summary>
+    /// The receiver cap these tests state, high enough that it never fires: they
+    /// are about reassembly, not about the cap. Stating one is not optional —
+    /// CORELIB_PLAN §6.2.1 gives the argument no unset state and no "unlimited"
+    /// spelling — so they state the largest length a payload can have. The cap's
+    /// own behaviour is exercised in <see cref="PayloadAccCapTests"/>.
+    /// </summary>
+    private const long AnyLength = int.MaxValue;
+
     /// <summary>Two, three and four byte sequences, so a split can land inside one.</summary>
     private const string Sample = "héllo — wörld 😀 ünïcodé";
 
@@ -43,7 +52,7 @@ public class PayloadAccTests
         var acc = new PayloadAcc();
         int total = payload.Length;
 
-        string? first = acc.String(total, 0, payload, 0, split);
+        string? first = acc.String(total, 0, payload, 0, split, AnyLength);
         if (split >= total)
         {
             Assert.NotNull(first);
@@ -51,7 +60,7 @@ public class PayloadAccTests
         }
 
         Assert.Null(first); // incomplete: no value, no verdict
-        string? second = acc.String(total, split, payload, split, total - split);
+        string? second = acc.String(total, split, payload, split, total - split, AnyLength);
         Assert.NotNull(second);
         return second!;
     }
@@ -62,7 +71,7 @@ public class PayloadAccTests
         var acc = new PayloadAcc();
         int total = payload.Length;
 
-        byte[]? first = acc.Blob(total, 0, payload, 0, split);
+        byte[]? first = acc.Blob(total, 0, payload, 0, split, AnyLength);
         if (split >= total)
         {
             Assert.NotNull(first);
@@ -70,7 +79,7 @@ public class PayloadAccTests
         }
 
         Assert.Null(first);
-        byte[]? second = acc.Blob(total, split, payload, split, total - split);
+        byte[]? second = acc.Blob(total, split, payload, split, total - split, AnyLength);
         Assert.NotNull(second);
         return second!;
     }
@@ -110,7 +119,7 @@ public class PayloadAccTests
         for (int i = 0; i < payload.Length; i++)
         {
             Assert.Null(value);
-            value = acc.String(payload.Length, i, payload, i, 1);
+            value = acc.String(payload.Length, i, payload, i, 1, AnyLength);
         }
 
         Assert.Equal(Sample, value);
@@ -129,7 +138,7 @@ public class PayloadAccTests
         {
             int take = Math.Min(step, payload.Length - offset);
             Assert.Null(value);
-            value = acc.Blob(payload.Length, offset, payload, offset, take);
+            value = acc.Blob(payload.Length, offset, payload, offset, take, AnyLength);
             offset += take;
         }
 
@@ -145,9 +154,9 @@ public class PayloadAccTests
         // `total` bytes belong to this field. The trailing byte here is a lone
         // continuation, so an accumulator reading one byte too far rejects.
         byte[] data = Bytes(0x68, 0x69, 0x80);
-        Assert.Equal("hi", new PayloadAcc().String(2, 0, data, 0, data.Length));
+        Assert.Equal("hi", new PayloadAcc().String(2, 0, data, 0, data.Length, AnyLength));
 
-        byte[]? blob = new PayloadAcc().Blob(2, 0, data, 0, data.Length);
+        byte[]? blob = new PayloadAcc().Blob(2, 0, data, 0, data.Length, AnyLength);
         Assert.Equal(Bytes(0x68, 0x69), blob);
     }
 
@@ -158,10 +167,10 @@ public class PayloadAccTests
         // must come back as a copy -- whole-in-one-chunk and reassembled alike.
         byte[] data = Bytes(1, 2, 3, 4);
 
-        byte[]? whole = new PayloadAcc().Blob(4, 0, data, 0, 4);
+        byte[]? whole = new PayloadAcc().Blob(4, 0, data, 0, 4, AnyLength);
         var acc = new PayloadAcc();
-        Assert.Null(acc.Blob(4, 0, data, 0, 2));
-        byte[]? split = acc.Blob(4, 2, data, 2, 2);
+        Assert.Null(acc.Blob(4, 0, data, 0, 2, AnyLength));
+        byte[]? split = acc.Blob(4, 2, data, 2, 2, AnyLength);
 
         data[0] = 0xFF; // the decoder moves on and reuses its input buffer
         Assert.Equal(Bytes(1, 2, 3, 4), whole);
@@ -177,8 +186,8 @@ public class PayloadAccTests
     public void AnEmptyPayloadIsAnOrdinaryValue()
     {
         // total == 0 is delivered as one callback with an empty chunk.
-        Assert.Equal(string.Empty, new PayloadAcc().String(0, 0, Array.Empty<byte>(), 0, 0));
-        Assert.Equal(Array.Empty<byte>(), new PayloadAcc().Blob(0, 0, Array.Empty<byte>(), 0, 0));
+        Assert.Equal(string.Empty, new PayloadAcc().String(0, 0, Array.Empty<byte>(), 0, 0, AnyLength));
+        Assert.Equal(Array.Empty<byte>(), new PayloadAcc().Blob(0, 0, Array.Empty<byte>(), 0, 0, AnyLength));
     }
 
     [Fact]
@@ -190,8 +199,8 @@ public class PayloadAccTests
         byte[] data = Bytes(0x6F, 0x6F, 0x00, 0x00, 0x66, 0x66);
         var acc = new PayloadAcc();
 
-        Assert.Null(acc.String(4, 0, data, 4, 2));
-        Assert.Equal("ffoo", acc.String(4, 2, data, 0, 2));
+        Assert.Null(acc.String(4, 0, data, 4, 2, AnyLength));
+        Assert.Equal("ffoo", acc.String(4, 2, data, 0, 2, AnyLength));
     }
 
     // --- invalid UTF-8, wherever the split falls ------------------------------
@@ -246,11 +255,11 @@ public class PayloadAccTests
         // payload's first chunk arrives at offset 0, and that is where they go:
         // there is no re-arming call for a caller to forget.
         var acc = new PayloadAcc();
-        Assert.Null(acc.String(9, 0, Utf8Bytes("abandoned"), 0, 5));
+        Assert.Null(acc.String(9, 0, Utf8Bytes("abandoned"), 0, 5, AnyLength));
 
         byte[] next = Utf8Bytes("kept");
-        Assert.Null(acc.String(next.Length, 0, next, 0, 2));
-        Assert.Equal("kept", acc.String(next.Length, 2, next, 2, 2));
+        Assert.Null(acc.String(next.Length, 0, next, 0, 2, AnyLength));
+        Assert.Equal("kept", acc.String(next.Length, 2, next, 2, 2, AnyLength));
     }
 
     [Fact]
@@ -262,15 +271,15 @@ public class PayloadAccTests
         byte[] first = Utf8Bytes("first value");
         byte[] second = Utf8Bytes("second");
 
-        Assert.Null(acc.String(first.Length, 0, first, 0, 4));
-        Assert.Equal("first value", acc.String(first.Length, 4, first, 4, first.Length - 4));
+        Assert.Null(acc.String(first.Length, 0, first, 0, 4, AnyLength));
+        Assert.Equal("first value", acc.String(first.Length, 4, first, 4, first.Length - 4, AnyLength));
 
-        Assert.Null(acc.Blob(second.Length, 0, second, 0, 1));
-        Assert.Equal(second, acc.Blob(second.Length, 1, second, 1, second.Length - 1));
+        Assert.Null(acc.Blob(second.Length, 0, second, 0, 1, AnyLength));
+        Assert.Equal(second, acc.Blob(second.Length, 1, second, 1, second.Length - 1, AnyLength));
 
         // A whole payload after a split one takes the fast path and is unaffected
         // by what the buffer still holds.
-        Assert.Equal("third", acc.String(5, 0, Utf8Bytes("third"), 0, 5));
+        Assert.Equal("third", acc.String(5, 0, Utf8Bytes("third"), 0, 5, AnyLength));
     }
 
     [Fact]
@@ -284,7 +293,7 @@ public class PayloadAccTests
         for (int offset = 0; offset < total; offset += 997)
         {
             int take = Math.Min(997, total - offset);
-            value = acc.Blob(total, offset, payload, offset, take);
+            value = acc.Blob(total, offset, payload, offset, take, AnyLength);
         }
 
         Assert.Equal(payload, value);
@@ -302,12 +311,12 @@ public class PayloadAccTests
         // Warm the two paths up first, so what is measured is the allocation the
         // announcement causes and not the JIT's one-off work.
         var warmup = new PayloadAcc();
-        Assert.Null(warmup.Blob(64, 0, chunk, 0, chunk.Length));
-        Assert.Null(warmup.String(64, 0, chunk, 0, chunk.Length));
+        Assert.Null(warmup.Blob(64, 0, chunk, 0, chunk.Length, AnyLength));
+        Assert.Null(warmup.String(64, 0, chunk, 0, chunk.Length, AnyLength));
 
         long before = GC.GetAllocatedBytesForCurrentThread();
-        Assert.Null(acc.Blob(int.MaxValue, 0, chunk, 0, chunk.Length));
-        Assert.Null(acc.String(int.MaxValue, 0, chunk, 0, chunk.Length));
+        Assert.Null(acc.Blob(int.MaxValue, 0, chunk, 0, chunk.Length, AnyLength));
+        Assert.Null(acc.String(int.MaxValue, 0, chunk, 0, chunk.Length, AnyLength));
         long allocated = GC.GetAllocatedBytesForCurrentThread() - before;
 
         Assert.True(allocated < 4096, "allocated " + allocated + " bytes for 16 delivered");
@@ -328,7 +337,7 @@ public class PayloadAccTests
 
         public void String(int id, int total, int offset, byte[] data, int chunkOffset, int chunkLength)
         {
-            string? value = _acc.String(total, offset, data, chunkOffset, chunkLength);
+            string? value = _acc.String(total, offset, data, chunkOffset, chunkLength, AnyLength);
             if (value is null)
             {
                 return; // more chunks to come
