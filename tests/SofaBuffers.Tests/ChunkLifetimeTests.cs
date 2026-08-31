@@ -36,6 +36,14 @@ namespace SofaBuffers.Tests;
 
 public class ChunkLifetimeTests
 {
+    /// <summary>
+    /// The receiver cap these tests state, high enough that it never fires: they
+    /// are about reassembly, not about the cap. Stating one is not optional —
+    /// CORELIB_PLAN §6.2.1 gives the argument no unset state and no "unlimited"
+    /// spelling — so they state the largest length a payload can have. The cap's
+    /// own behaviour is exercised in <see cref="PayloadAccCapTests"/>.
+    /// </summary>
+    private const long AnyLength = int.MaxValue;
     private const byte Scrub = 0xEE;
 
     /// <summary>Materializes every value as it arrives, exactly as generated code does.</summary>
@@ -57,7 +65,7 @@ public class ChunkLifetimeTests
 
         public void String(int id, int total, int offset, byte[] data, int co, int cl)
         {
-            string? s = _acc.String(total, offset, data, co, cl);
+            string? s = _acc.String(total, offset, data, co, cl, AnyLength);
             if (s != null)
             {
                 Values.Add($"t{id}={s}");
@@ -66,7 +74,7 @@ public class ChunkLifetimeTests
 
         public void Blob(int id, int total, int offset, byte[] data, int co, int cl)
         {
-            byte[]? b = _acc.Blob(total, offset, data, co, cl);
+            byte[]? b = _acc.Blob(total, offset, data, co, cl, AnyLength);
             if (b != null)
             {
                 Values.Add($"b{id}={Convert.ToHexString(b)}");
