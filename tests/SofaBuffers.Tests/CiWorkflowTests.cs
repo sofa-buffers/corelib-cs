@@ -15,9 +15,12 @@
  * `.github/workflows/ci.yml` out of the source tree, expand the matrix the
  * build-and-test job declares, and fail when the configurations its `dotnet build`
  * and `dotnet test` invocations actually run in stop covering both Debug and
- * Release, when a matrix leg can cancel its siblings, or when the dependency cache
- * disappears again. Reading YAML with regexes is enough here because the assertions
- * only concern the two commands and the matrix keys feeding them.
+ * Release, when a matrix leg can cancel its siblings, when the dependency cache
+ * disappears again, or when the workflow stops running the whole solution on both
+ * push and pull_request (which is how the shared conformance vectors reach CI --
+ * they have no workflow of their own). Reading YAML with regexes is enough here
+ * because the assertions only concern those commands, the trigger block and the
+ * matrix keys feeding them.
  *
  * SPDX-License-Identifier: MIT
  */
@@ -187,6 +190,45 @@ public class CiWorkflowTests
         }
 
         Assert.Contains(JobBlock(BuildTestJob), l => Regex.IsMatch(l, @"^\s+fail-fast:\s*false\s*$"));
+    }
+
+    /// <summary>
+    /// §13's checklist item "CI builds and tests on push and PR": the workflow
+    /// fires on both events, and the test step runs the whole solution rather
+    /// than a hand-picked project.
+    /// </summary>
+    /// <remarks>
+    /// The shared conformance vectors (assets/test_vectors.json, replayed by
+    /// TestVectorsConformanceTests) have no CI entry point of their own — they
+    /// ride the solution-wide `dotnet test`, which is what makes the skip
+    /// scenario of §7.2 item 7 a gate on every push and every pull request. A
+    /// test step narrowed to one project, or a trigger losing one of the two
+    /// events, would take the vectors out of CI without any test going red, so
+    /// the two conditions are asserted here.
+    /// </remarks>
+    [Fact]
+    public void CiRunsTheWholeSolutionOnPushAndPullRequest()
+    {
+        if (!HaveWorkflow)
+        {
+            return;
+        }
+
+        string[] lines = File.ReadAllLines(WorkflowPath());
+        int on = Array.FindIndex(lines, l => Regex.IsMatch(l, @"^on:\s*$"));
+        Assert.True(on >= 0, "ci.yml has no `on:` block");
+
+        // The trigger block runs to the next top-level key.
+        int end = Array.FindIndex(lines, on + 1, l => Regex.IsMatch(l, @"^[A-Za-z_][\w-]*:"));
+        string[] triggers = lines[on..(end < 0 ? lines.Length : end)];
+
+        Assert.Contains(triggers, l => Regex.IsMatch(l, @"^\s+push:"));
+        Assert.Contains(triggers, l => Regex.IsMatch(l, @"^\s+pull_request:"));
+
+        Assert.Contains(
+            JobBlock(BuildTestJob),
+            l => l.Contains("dotnet test", StringComparison.Ordinal)
+                && l.Contains("SofaBuffers.sln", StringComparison.Ordinal));
     }
 
     /// <summary>
