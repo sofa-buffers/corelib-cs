@@ -60,6 +60,18 @@ namespace sofab;
 /// <b>required</b>: there is no unset state and no unlimited mode.
 /// </para>
 /// <para>
+/// <b>...and at the LENGTH WORD, not only at the first chunk.</b> <see cref="String"/>
+/// and <see cref="Blob"/> cannot be the enforcement point on their own: they fire
+/// only once a payload byte exists, so a message that ends immediately after the
+/// length word reaches neither, and a decode whose verdict was already decided
+/// answers <c>Incomplete</c> instead — losing the category (§6.3 makes the refusal
+/// terminal) and inviting a caller to keep feeding a stream this receiver has
+/// already refused. So the comparison is reachable on its own, as
+/// <see cref="CheckStringLength"/> / <see cref="CheckBlobLength"/>, for a caller to
+/// make from <see cref="IVisitor.FixlenBegin"/>. The payload methods call the same
+/// two, so the rule has <b>one implementation</b> applied at two points.
+/// </para>
+/// <para>
 /// <b>Behind the tag test, and only for a field that is read.</b> Generated code
 /// resolves the destination first (MESSAGE_SPEC §7.3: a field whose wire type
 /// contradicts the declared one is skipped, and a skipped field is never capped)
@@ -131,10 +143,7 @@ public sealed class PayloadAcc
     /// </exception>
     public string? String(int total, int offset, byte[] data, int chunkOffset, int chunkLength, long cap)
     {
-        if (total > cap)
-        {
-            ThrowCap(total, cap, "max_dyn_string_len");
-        }
+        CheckStringLength(total, cap);
 
         if (offset == 0 && chunkLength >= total)
         {
@@ -176,10 +185,7 @@ public sealed class PayloadAcc
     /// </exception>
     public byte[]? Blob(int total, int offset, byte[] data, int chunkOffset, int chunkLength, long cap)
     {
-        if (total > cap)
-        {
-            ThrowCap(total, cap, "max_dyn_blob_len");
-        }
+        CheckBlobLength(total, cap);
 
         if (offset == 0 && chunkLength >= total)
         {
@@ -197,6 +203,76 @@ public sealed class PayloadAcc
         var value = new byte[total];
         Array.Copy(_buffer, 0, value, 0, total);
         return value;
+    }
+
+    /// <summary>
+    /// Refuse an announced <c>string</c> length the receiver's cap does not admit
+    /// — the §6.2.1 comparison on its own, for a caller to make at the
+    /// <b>length word</b>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <see cref="String"/> calls this first, so a caller that only routes payload
+    /// chunks is already covered. Call it in addition from
+    /// <see cref="IVisitor.FixlenBegin"/> to close the case no payload callback can
+    /// see: a message whose length word declares more than the cap and then
+    /// <em>ends</em>. There is no chunk, so there is no <see cref="String"/> call,
+    /// and the decode reports <c>Incomplete</c> for bytes this receiver has already
+    /// refused — the wrong category (§6.3 makes the refusal terminal) and an active
+    /// invitation to feed more of a stream that will never be accepted. Three bytes
+    /// claiming a hundred, or five claiming a megabyte, would hold a connection
+    /// open: the amplification the caps exist to close.
+    /// </para>
+    /// <para>
+    /// Calling it at both points is not two implementations of the rule. It is this
+    /// one, applied where §6.2.1 requires it ("at the count/length header — before
+    /// the allocation it is meant to prevent") and again where an accumulator driven
+    /// by hand would otherwise slip past it.
+    /// </para>
+    /// <para>
+    /// <b>Only for a field this message actually reads.</b> §6.2.1: "a skipped field
+    /// is never capped" — a limit bounds an allocation, and a field walked over
+    /// allocates nothing. The caller resolves the destination, and the MESSAGE_SPEC
+    /// §7.3 subtype test, before it gets here.
+    /// </para>
+    /// </remarks>
+    /// <param name="total">the announced payload length, as the <c>fixlen_word</c> gives it</param>
+    /// <param name="cap">
+    /// the receiver's <c>max_dyn_string_len</c> for this field — the caller's
+    /// number, used for this one comparison and not retained; for a field the
+    /// schema bounds, the schema <c>maxlen</c> the caller has already enforced
+    /// </param>
+    /// <exception cref="SofabException">
+    /// (<see cref="SofabError.LimitExceeded"/>) when <paramref name="total"/> exceeds
+    /// <paramref name="cap"/>; (<see cref="SofabError.Argument"/>) when no cap was
+    /// stated (<paramref name="cap"/> is negative).
+    /// </exception>
+    public static void CheckStringLength(int total, long cap)
+    {
+        if (total > cap)
+        {
+            ThrowCap(total, cap, "max_dyn_string_len");
+        }
+    }
+
+    /// <summary>
+    /// Refuse an announced <c>blob</c> length the receiver's cap does not admit —
+    /// the <c>blob</c> twin of <see cref="CheckStringLength"/>, down to why it
+    /// exists. A <c>blob</c> and a <c>string</c> are separate limits.
+    /// </summary>
+    /// <param name="total">the announced payload length, as the <c>fixlen_word</c> gives it</param>
+    /// <param name="cap">the receiver's <c>max_dyn_blob_len</c> for this field</param>
+    /// <exception cref="SofabException">
+    /// (<see cref="SofabError.LimitExceeded"/>) when <paramref name="total"/> exceeds
+    /// <paramref name="cap"/>; (<see cref="SofabError.Argument"/>) when no cap was
+    /// stated.
+    /// </exception>
+    public static void CheckBlobLength(int total, long cap)
+    {
+        if (total > cap)
+        {
+            ThrowCap(total, cap, "max_dyn_blob_len");
+        }
     }
 
     /// <summary>
