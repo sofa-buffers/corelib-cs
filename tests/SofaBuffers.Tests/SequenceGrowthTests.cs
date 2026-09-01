@@ -223,6 +223,16 @@ public class SequenceGrowthTests
 
         internal int Length { get; private set; }
 
+        /// <summary>
+        /// The destination BUFFER's length, which is not the same as
+        /// <see cref="Length"/>: EnsureCap doubles, so the buffer may legitimately
+        /// run ahead of the logical length. Asserted separately on a rejection,
+        /// because a partial extension is a fact about the buffer -- a logical
+        /// length updated only after a successful placement would report the right
+        /// number even if the buffer had already grown toward the rejected index.
+        /// </summary>
+        internal int Capacity => _structElements ? _numbers.Length : _strings.Length;
+
         internal GrowthDest(int fieldId, bool structElements)
         {
             _fieldId = fieldId;
@@ -372,6 +382,12 @@ public class SequenceGrowthTests
             {
                 Assert.True(dest.Length <= max,
                     $"container length {dest.Length}, want at most {max} -- extended toward the rejected index");
+                // And the buffer behind it: §6.2.1 bounds the index "before the
+                // container it indexes into is extended", so a rejected id must
+                // leave no allocation behind either.
+                Assert.True(dest.Capacity <= max,
+                    $"destination buffer grew to {dest.Capacity}, want at most {max} -- "
+                    + "the index was bounded after the container was extended");
             }
             if (c.Terminal)
             {
