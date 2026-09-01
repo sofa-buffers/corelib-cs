@@ -52,8 +52,9 @@
  * array, sequence, fp64, int64). This full-wire-format implementation supports
  * them all and runs every vector; a feature-reduced build would skip the rest.
  *
- * The vector file is a verbatim copy and may carry top-level blocks this suite
- * does not replay (today: "sequence_growth", CORELIB_PLAN §7.2 item 8). The loader
+ * The vector file is a verbatim copy and carries top-level blocks this file does
+ * not replay itself: "invalid_utf8" is run by StrictUtf8Tests and
+ * "sequence_growth" (CORELIB_PLAN §7.2 item 8) by SequenceGrowthTests. The loader
  * ignores what it does not run -- an unknown block is never a load failure -- but
  * it refuses anything it would have to shrink to fit: see the loader guards below.
  *
@@ -908,9 +909,9 @@ public class TestVectorsConformanceTests : IClassFixture<TestVectorsConformanceT
     /// loader ignores them instead of failing.
     /// </summary>
     /// <remarks>
-    /// <c>sequence_growth</c> (CORELIB_PLAN §7.2 item 8) arrived with the
-    /// regenerated file and is not run here; <c>invalid_utf8</c> is run, but by
-    /// StrictUtf8Tests rather than by this file. Tolerating an unrun block is
+    /// Neither block is run by THIS file: <c>invalid_utf8</c> is run by
+    /// StrictUtf8Tests and <c>sequence_growth</c> (CORELIB_PLAN §7.2 item 8) by
+    /// SequenceGrowthTests. Tolerating a block a given file does not run is
     /// what keeps §7.1's "copy it verbatim" possible -- the alternative is
     /// trimming the shared file to what this port replays, which is exactly the
     /// hand-editing §7.1 forbids.
