@@ -253,6 +253,93 @@ public class PayloadAccCapTests
         Assert.Equal("0123456789", visitor.Value);
     }
 
+    // --- the same comparison, offered at the LENGTH WORD ----------------------
+
+    /// <remarks>
+    /// The check reachable on its own, for the caller to make from
+    /// <c>IVisitor.FixlenBegin</c> — the point §6.2.1 actually names: "at the
+    /// count/length header — before the allocation it is meant to prevent".
+    ///
+    /// <para><see cref="PayloadAcc.String"/> cannot be that point by itself. It
+    /// fires only once a payload byte exists, so a message whose length word
+    /// declares 100 bytes and then <em>ends</em> reaches no chunk, no call and no
+    /// verdict — and the decode answers <c>Incomplete</c> for bytes already
+    /// refused, which §6.3 makes the wrong category (the refusal is terminal) and
+    /// §5.2.4 makes an invitation to feed a stream that will never be accepted.
+    /// Three bytes claiming a hundred is the shape that matters.</para>
+    /// </remarks>
+    [Fact]
+    public void AnOverCapLengthIsRefusedWithNoPayloadAtAll()
+    {
+        SofabException s = Assert.Throws<SofabException>(() => PayloadAcc.CheckStringLength(100, 8));
+        Assert.Equal(SofabError.LimitExceeded, s.Error);
+
+        SofabException b = Assert.Throws<SofabException>(() => PayloadAcc.CheckBlobLength(1 << 20, 8));
+        Assert.Equal(SofabError.LimitExceeded, b.Error);
+    }
+
+    /// <summary>A length at or below the cap passes the header check silently.</summary>
+    [Fact]
+    public void AnInCapLengthPassesTheHeaderCheck()
+    {
+        PayloadAcc.CheckStringLength(8, 8);
+        PayloadAcc.CheckStringLength(0, 8);
+        PayloadAcc.CheckBlobLength(8, 8);
+    }
+
+    /// <summary>
+    /// An unstated cap is a caller defect here too — <c>Argument</c>, never
+    /// <c>LimitExceeded</c>, which would promise a limit nobody configured, and
+    /// never silently uncapped (§6.2.1, §6.3).
+    /// </summary>
+    [Fact]
+    public void TheHeaderCheckRefusesAnUnstatedCap()
+    {
+        Assert.Equal(SofabError.Argument,
+            Assert.Throws<SofabException>(() => PayloadAcc.CheckStringLength(1, -1)).Error);
+        Assert.Equal(SofabError.Argument,
+            Assert.Throws<SofabException>(() => PayloadAcc.CheckBlobLength(1, -1)).Error);
+    }
+
+    /// <summary>
+    /// One implementation, two application points (§6.2.1, "one implementation,
+    /// wherever it runs"): the payload call answers identically to the header check
+    /// for every length, so an accumulator driven by hand — without the header call
+    /// — is still bounded, and a caller making both cannot get two verdicts out of
+    /// one length.
+    /// </summary>
+    [Fact]
+    public void TheHeaderCheckAndThePayloadCallAgreeOnEveryLength()
+    {
+        foreach (int total in new[] { 0, 1, 7, 8, 9, 100, 1 << 20 })
+        {
+            SofabError? header = null;
+            try
+            {
+                PayloadAcc.CheckStringLength(total, 8);
+            }
+            catch (SofabException e)
+            {
+                header = e.Error;
+            }
+
+            SofabError? chunk = null;
+            try
+            {
+                // One byte of a `total`-byte payload: enough to reach the guard,
+                // never enough to complete anything.
+                byte[] data = new byte[Math.Max(total, 1)];
+                new PayloadAcc().String(total, 0, data, 0, Math.Min(total, 1), 8);
+            }
+            catch (SofabException e)
+            {
+                chunk = e.Error;
+            }
+
+            Assert.Equal(header, chunk);
+        }
+    }
+
     // --- the corelib holds no limit (the structural half) ---------------------
 
     [Fact]
