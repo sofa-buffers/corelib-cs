@@ -525,8 +525,16 @@ to pick a configuration. CI crosses the two axes and runs all four legs. The
 `.devcontainer/` builds a ready-to-use image with the SDKs and tooling
 preinstalled. Tests live in `tests/SofaBuffers.Tests/`, including conformance
 replay of the shared language-agnostic vectors (byte-exact encode, field-match
-decode, byte-at-a-time chunked decode); helpers shared between test files live in
-its `Common/`.
+decode, byte-at-a-time chunked decode, and — for the vectors that name ids a
+receiver ignores — a skipping decode, again whole and byte-at-a-time); the run
+prints how many vectors and checks it executed. The skipping runs grade the
+*receiver* model, not a decoder skip path: this decoder parses every field and a
+visitor drops what it was handed (see [Deserialize](#deserialize)), so what those
+cases add over the plain decode is the receiver-side rule — that ignoring an id,
+including a whole sub-sequence at any depth, leaves exactly the expected residual
+fields. The top-level `sequence_growth` block of the shared file is not replayed
+yet (CORELIB_PLAN §7.2 item 8); the loader carries it without running it. Helpers
+shared between test files live in its `Common/`.
 
 ## Benchmarks
 
