@@ -228,11 +228,13 @@ public class BenchSpecTests
         byte[] wire = OneShotBlob(Workloads.MakeBlob());
         var seen = new Chunks();
         var istream = new IStream();
+        DecodeStatus status = DecodeStatus.Incomplete;
         for (int off = 0; off < wire.Length; off += Workloads.StreamBuffer)
         {
-            istream.Feed(wire, off, Math.Min(Workloads.StreamBuffer, wire.Length - off), seen);
+            status = istream.Feed(
+                wire, off, Math.Min(Workloads.StreamBuffer, wire.Length - off), seen);
         }
-        Assert.Equal(DecodeStatus.Complete, istream.Status);
+        Assert.Equal(DecodeStatus.Complete, status);
         Assert.Equal(1_000_000, seen.Bytes); // the whole payload arrived
         // A payload delivered in one piece is not a streaming decode.
         Assert.True(seen.Calls >= 244, "chunks: " + seen.Calls);

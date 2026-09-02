@@ -24,9 +24,10 @@ namespace sofab;
 /// lives inside the decoder, a message may be split across any number of
 /// <c>Feed</c> calls at any byte boundary — true streaming on the input side.
 /// <para>
-/// Each <c>Feed</c> returns a <see cref="DecodeStatus"/> (also readable via
-/// <see cref="Status"/>): <see cref="DecodeStatus.Complete"/> if the bytes so far
-/// end at a field boundary, or <see cref="DecodeStatus.Incomplete"/> if they end
+/// Each <c>Feed</c> returns a <see cref="DecodeStatus"/> — the one and only way
+/// to learn where the decode stands: <see cref="DecodeStatus.Complete"/> if the
+/// bytes so far end at a field boundary, or
+/// <see cref="DecodeStatus.Incomplete"/> if they end
 /// inside a field or with an open sequence (MESSAGE_SPEC §7). Incomplete is
 /// <em>not</em> an error and is <em>not</em> a rejection — the partial field is
 /// held and resumed on the next chunk; the caller owns end-of-input and decides
@@ -37,12 +38,11 @@ namespace sofab;
 /// <para>
 /// <b>A rejection is terminal.</b> Malformed bytes are malformed regardless of
 /// what follows, so once a <c>Feed</c> has thrown
-/// <see cref="SofabError.InvalidMessage"/> the decoder latches that verdict:
-/// <see cref="Status"/> reports <see cref="DecodeStatus.Invalid"/> and every
-/// later <c>Feed</c> throws again, consuming nothing and emitting no visitor
-/// callback — a caller that logs the error and keeps reading its socket cannot
-/// resume a stream this decoder has already rejected. Decode a new message with
-/// a new <see cref="IStream"/>.
+/// <see cref="SofabError.InvalidMessage"/> the decoder latches that verdict, and
+/// every later <c>Feed</c> throws again, consuming nothing and emitting no
+/// visitor callback — a caller that logs the error and keeps reading its socket
+/// cannot resume a stream this decoder has already rejected. Decode a new
+/// message with a new <see cref="IStream"/>.
 /// </para>
 /// <para>
 /// Unlike the C decoder there is no per-field "bind a destination" step and no
@@ -111,8 +111,9 @@ public sealed class IStream
         /// A receiver-side limit was exceeded (§6.2.1). Also terminal, but
         /// <b>not</b> <c>INVALID</c>: the bytes are well-formed and §6.3 forbids
         /// folding a policy rejection into the wire-conformance outcome, so this
-        /// state closes the stream without ever making <see cref="Status"/> say
-        /// <see cref="DecodeStatus.Invalid"/>.
+        /// state closes the stream while the <see cref="SofabError.LimitExceeded"/>
+        /// exception — not <see cref="DecodeStatus.Invalid"/> — carries the
+        /// refusal to the caller.
         /// </summary>
         LimitStopped,
     }
@@ -214,8 +215,9 @@ public sealed class IStream
     /// — a partial varint, an unfinished fixlen / array payload, or a still-open
     /// nested sequence (MESSAGE_SPEC §7). Incomplete is not an error and not a
     /// rejection: the decoder keeps its partial state, so feeding the next chunk
-    /// resumes exactly where this one stopped. The same value is available
-    /// afterwards via <see cref="Status"/>.
+    /// resumes exactly where this one stopped. This returned value is the only
+    /// report of the outcome: there is no separate status accessor to consult
+    /// afterwards, and none to drift out of step with it.
     /// </returns>
     /// <exception cref="SofabException">
     /// with <see cref="SofabError.InvalidMessage"/> on malformed input — including
@@ -325,12 +327,13 @@ public sealed class IStream
                 : State.LimitStopped;
             throw;
         }
-        return Status;
+        return Outcome;
     }
 
     /// <summary>
-    /// The decode outcome for the bytes consumed so far (MESSAGE_SPEC §7): a pure
-    /// accessor that never throws and never mutates state.
+    /// The decode outcome for the bytes consumed so far (MESSAGE_SPEC §7),
+    /// computed from the decoder's own state: a pure expression that never throws
+    /// and never mutates state.
     /// </summary>
     /// <value>
     /// <see cref="DecodeStatus.Invalid"/> once a <c>Feed</c> has rejected the
@@ -343,31 +346,33 @@ public sealed class IStream
     /// payload) or a nested sequence is still open.
     /// </value>
     /// <remarks>
-    /// This is the same value the last <see cref="Feed(byte[], IVisitor)"/>
-    /// returned; it lets a caller that fed byte-at-a-time query the outcome
-    /// without another <c>Feed</c>. Per the finish-less spec there is no finalize
-    /// step: a trailing <see cref="DecodeStatus.Incomplete"/> is a truncation the
-    /// caller interprets, not an error the decoder raises.
+    /// <b>Deliberately private.</b> This is what <c>Feed</c> returns, and
+    /// <c>Feed</c> returning it is the <em>only</em> way a caller learns where the
+    /// decode stands. A public accessor alongside it would be a second decode
+    /// surface answering the same question (CORELIB_PLAN §5.3.1) — one fact with
+    /// two ways to read it, which is exactly how this family once shipped a
+    /// <c>Feed</c> that refused a message while the accessor still called it
+    /// <c>Complete</c>. Per the finish-less spec (§5.2.4) there is nothing to
+    /// consult afterwards either: a trailing <see cref="DecodeStatus.Incomplete"/>
+    /// is a truncation the caller interprets, not an error the decoder raises.
     /// <para>
     /// A malformed message is reported by <c>Feed</c> as a thrown
-    /// <see cref="SofabException"/> (<see cref="SofabError.InvalidMessage"/>) — but
-    /// the verdict is latched, so this property answers
-    /// <see cref="DecodeStatus.Invalid"/> from then on and never again claims the
-    /// stream is <see cref="DecodeStatus.Complete"/> or merely
-    /// <see cref="DecodeStatus.Incomplete"/>. A caller that catches the exception
-    /// and keeps feeding gets the same exception from every later <c>Feed</c>.
+    /// <see cref="SofabException"/> (<see cref="SofabError.InvalidMessage"/>), and
+    /// the verdict is latched: a caller that catches it and keeps feeding gets the
+    /// same exception from every later <c>Feed</c>, so no <c>Feed</c> ever again
+    /// claims the stream is <see cref="DecodeStatus.Complete"/> or merely
+    /// <see cref="DecodeStatus.Incomplete"/>.
     /// </para>
     /// <para>
     /// A receiver-side limit (<see cref="SofabError.LimitExceeded"/>, §6.2.1) is
     /// terminal too — the stream is closed to further feeds — but it is
     /// deliberately <em>not</em> reported as <see cref="DecodeStatus.Invalid"/>:
     /// those bytes are well-formed, and §6.3 forbids folding a receiver's policy
-    /// rejection into the wire-conformance outcome. Such a decoder reports
-    /// <see cref="DecodeStatus.Incomplete"/>, which is what happened — it stopped
-    /// part-way through a message and will not finish it.
+    /// rejection into the wire-conformance outcome. The refusal travels on the
+    /// error channel instead, carrying its own code.
     /// </para>
     /// </remarks>
-    public DecodeStatus Status =>
+    private DecodeStatus Outcome =>
         _state == State.Rejected ? DecodeStatus.Invalid
             : AtBoundary ? DecodeStatus.Complete : DecodeStatus.Incomplete;
 
@@ -383,7 +388,7 @@ public sealed class IStream
     /// of these is INCOMPLETE (§7). Mid-array parsing already implies a non-idle
     /// state, so <see cref="_inArray"/> needs no separate check. The two terminal
     /// states are not a parse position at all and are answered by
-    /// <see cref="Status"/> before it consults this.
+    /// <see cref="Outcome"/> before it consults this.
     /// </remarks>
     private bool AtBoundary =>
         _state == State.Idle && _varintShift == 0 && _depth == 0;

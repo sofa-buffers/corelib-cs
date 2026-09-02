@@ -139,7 +139,11 @@ public class Utf8ChunkBoundaryTests
             }
             catch (SofabException e) when (e.Error == SofabError.InvalidMessage)
             {
-                Assert.Equal(DecodeStatus.Invalid, iss.Status); // terminal, and latched
+                // Terminal, and latched: the next Feed re-reports the same verdict
+                // rather than resuming, even fed nothing at all.
+                var again = Assert.Throws<SofabException>(
+                    () => iss.Feed(Array.Empty<byte>(), visitor));
+                Assert.Equal(SofabError.InvalidMessage, again.Error);
                 return "invalid";
             }
         }

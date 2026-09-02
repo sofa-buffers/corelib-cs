@@ -25,10 +25,11 @@ namespace sofab;
 /// <para>
 /// <see cref="Invalid"/> input — malformed regardless of what follows — is never
 /// <em>returned</em>: <c>Feed</c> throws <see cref="SofabException"/> with
-/// <see cref="SofabError.InvalidMessage"/> instead. That verdict is terminal, so
-/// the decoder latches it — <see cref="IStream.Status"/> answers
-/// <see cref="Invalid"/> from then on, and every later <c>Feed</c> throws again
-/// rather than resuming a stream already known to be malformed.
+/// <see cref="SofabError.InvalidMessage"/> instead, the error channel carrying
+/// the refusal and its code (§6.3). That verdict is terminal, and the decoder
+/// latches it: every later <c>Feed</c> throws again rather than resuming a stream
+/// already known to be malformed. There is no status accessor to consult
+/// alongside the return value — what <c>Feed</c> hands back is the whole answer.
 /// </para>
 /// <para>
 /// This mirrors the Go port's <c>ErrIncomplete</c> sentinel and the TypeScript
@@ -51,9 +52,10 @@ public enum DecodeStatus
     /// <summary>
     /// The bytes are malformed regardless of what follows. Never returned by
     /// <c>Feed</c>: it throws <see cref="SofabException"/>
-    /// (<see cref="SofabError.InvalidMessage"/>) instead — but the verdict is
-    /// terminal, so <see cref="IStream.Status"/> reports this value for every
-    /// query after that throw.
+    /// (<see cref="SofabError.InvalidMessage"/>) instead, and the verdict is
+    /// terminal, so every later <c>Feed</c> throws the same exception. This
+    /// member names the outcome §5.2.1 defines — the value a caller catches
+    /// rather than reads.
     /// </summary>
     Invalid,
 }

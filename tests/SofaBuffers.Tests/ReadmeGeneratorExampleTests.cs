@@ -191,8 +191,6 @@ public class ReadmeGeneratorExampleTests
 
             public DecodeStatus Feed(byte[] chunk, int off, int len) => _is.Feed(chunk, off, len, _v);
 
-            public DecodeStatus Status => _is.Status;
-
             public Point Message => _m;
         }
     }
@@ -256,7 +254,6 @@ public class ReadmeGeneratorExampleTests
         }
 
         Assert.Equal(DecodeStatus.Complete, st);
-        Assert.Equal(DecodeStatus.Complete, dec.Status);
         Assert.Equal(3, dec.Message.X);
         Assert.Equal(4, dec.Message.Y);
     }
