@@ -27,8 +27,9 @@ public class InvalidLatchTests
 
     /// <summary>
     /// Feed <paramref name="malformed"/>, assert it is rejected, then assert the
-    /// verdict is terminal: Status is Invalid and a following Feed of a perfectly
-    /// good message throws again without emitting anything.
+    /// verdict is terminal: a following Feed of a perfectly good message throws
+    /// the same InvalidMessage again without emitting anything. The throw is the
+    /// whole report — there is no status accessor to cross-check it against.
     /// </summary>
     private static void AssertLatched(byte[] malformed)
     {
@@ -38,13 +39,10 @@ public class InvalidLatchTests
         var first = Assert.Throws<SofabException>(() => iss.Feed(malformed, visitor));
         Assert.Equal(SofabError.InvalidMessage, first.Error);
 
-        Assert.Equal(DecodeStatus.Invalid, iss.Status);
-
         int seen = visitor.Events.Count;
         var again = Assert.Throws<SofabException>(() => iss.Feed(Good(), visitor));
         Assert.Equal(SofabError.InvalidMessage, again.Error);
         Assert.Equal(seen, visitor.Events.Count); // no callback from the resumed feed
-        Assert.Equal(DecodeStatus.Invalid, iss.Status);
 
         // Still latched after the second rejection, and on the slice overload too.
         var third = Assert.Throws<SofabException>(
@@ -67,7 +65,6 @@ public class InvalidLatchTests
             }
         });
         Assert.Equal(SofabError.InvalidMessage, first.Error);
-        Assert.Equal(DecodeStatus.Invalid, iss.Status);
 
         int seen = visitor.Events.Count;
         var again = Assert.Throws<SofabException>(() => iss.Feed(Good(), visitor));
@@ -135,11 +132,17 @@ public class InvalidLatchTests
     {
         // Nested fp64 whose fixlen_word declares length 11 != 8, then truncates:
         // the word alone proves the message malformed, so the verdict is INVALID
-        // and stays INVALID -- never re-reported as INCOMPLETE.
+        // and stays INVALID -- never re-reported as INCOMPLETE. The second Feed is
+        // the check that matters: a decoder that had downgraded the verdict to
+        // "truncated" would return Incomplete there instead of throwing.
         var visitor = new RecordingVisitor();
         var iss = new IStream();
-        Assert.Throws<SofabException>(() => iss.Feed(Bytes(0x56, 0x0A, 0x59), visitor));
-        Assert.Equal(DecodeStatus.Invalid, iss.Status);
+        var first = Assert.Throws<SofabException>(
+            () => iss.Feed(Bytes(0x56, 0x0A, 0x59), visitor));
+        Assert.Equal(SofabError.InvalidMessage, first.Error);
+        var again = Assert.Throws<SofabException>(
+            () => iss.Feed(Bytes(0x59), visitor));
+        Assert.Equal(SofabError.InvalidMessage, again.Error);
     }
 
     // --- the latch survives a partially decoded prefix ------------------------
@@ -154,7 +157,6 @@ public class InvalidLatchTests
         Assert.Throws<SofabException>(
             () => iss.Feed(Bytes(0x00, 0x2A, 0x02, 0x04), visitor));
         Assert.Equal(new[] { "u:0=42" }, visitor.Events);
-        Assert.Equal(DecodeStatus.Invalid, iss.Status);
 
         Assert.Throws<SofabException>(() => iss.Feed(Good(), visitor));
         Assert.Equal(new[] { "u:0=42" }, visitor.Events);
@@ -171,7 +173,6 @@ public class InvalidLatchTests
         var iss = new IStream();
         var visitor = new ThrowingVisitor();
         Assert.Throws<SofabException>(() => iss.Feed(Good(), visitor));
-        Assert.Equal(DecodeStatus.Invalid, iss.Status);
         Assert.Throws<SofabException>(() => iss.Feed(Good(), new RecordingVisitor()));
     }
 
@@ -213,15 +214,17 @@ public class InvalidLatchTests
     {
         // §6.2.1 / §6.3: a receiver-side cap is a terminal policy rejection, but
         // the bytes are well-formed -- it must NOT be folded into the INVALID
-        // decode outcome. So the stream is closed to further feeds, and Status
-        // never reports Invalid for it.
+        // decode outcome. So the stream is closed to further feeds, and the
+        // refusal reaches the caller as LimitExceeded on the error channel --
+        // never as InvalidMessage, and never as the Invalid outcome.
         var iss = new IStream();
         var ex = Assert.Throws<SofabException>(() => iss.Feed(Good(), new LimitVisitor()));
         Assert.Equal(SofabError.LimitExceeded, ex.Error);
-        Assert.Equal(DecodeStatus.Incomplete, iss.Status); // stopped part-way, not "malformed"
+        Assert.NotEqual(SofabError.InvalidMessage, ex.Error);
 
         var again = Assert.Throws<SofabException>(() => iss.Feed(Good(), new RecordingVisitor()));
         Assert.Equal(SofabError.LimitExceeded, again.Error);
+        Assert.NotEqual(SofabError.InvalidMessage, again.Error);
     }
 
     private sealed class LimitVisitor : IVisitor

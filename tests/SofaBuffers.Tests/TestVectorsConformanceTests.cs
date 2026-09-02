@@ -728,13 +728,17 @@ public class TestVectorsConformanceTests : IClassFixture<TestVectorsConformanceT
 
         var oneByOne = new TokenVisitor();
         var iss = new IStream();
+        // Seeded with a zero-byte feed so the outcome is still asked of the
+        // decoder for a vector whose message is the empty byte string; every real
+        // byte overwrites it.
+        DecodeStatus status = iss.Feed(Array.Empty<byte>(), oneByOne);
         foreach (byte b in v.Expected)
         {
-            iss.Feed(new[] { b }, oneByOne);
+            status = iss.Feed(new[] { b }, oneByOne);
         }
 
         Assert.Equal(whole.Tokens, oneByOne.Tokens);
-        Assert.Equal(DecodeStatus.Complete, iss.Status);
+        Assert.Equal(DecodeStatus.Complete, status);
         _tally.Check(name);
     }
 
@@ -780,13 +784,14 @@ public class TestVectorsConformanceTests : IClassFixture<TestVectorsConformanceT
         // too, on the same vector.
         var visitor = new SkippingTokenVisitor(v.SkipIds!);
         var iss = new IStream();
+        DecodeStatus status = iss.Feed(Array.Empty<byte>(), visitor);
         foreach (byte b in v.Expected)
         {
-            iss.Feed(new[] { b }, visitor);
+            status = iss.Feed(new[] { b }, visitor);
         }
 
         Assert.Equal(ExpectedTokensSkipping(v.Fields, v.SkipIds!), visitor.Tokens);
-        Assert.Equal(DecodeStatus.Complete, iss.Status);
+        Assert.Equal(DecodeStatus.Complete, status);
         AssertSkipMatchesPlainDecode(v, visitor.Tokens);
         _tally.Check(name);
     }

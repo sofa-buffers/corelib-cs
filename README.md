@@ -241,8 +241,8 @@ int n;
 DecodeStatus status = DecodeStatus.Complete;
 while ((n = inStream.Read(chunk, 0, chunk.Length)) > 0)
     status = iss.Feed(chunk, 0, n, sink);      // decode this slice
-// status (also iss.Status) is Complete if the bytes ended at a field boundary,
-// or Incomplete if the stream stopped inside a field / with an open sequence.
+// status is Complete if the bytes ended at a field boundary, or Incomplete if
+// the stream stopped inside a field / with an open sequence.
 ```
 
 `Feed` returns a `DecodeStatus` (MESSAGE_SPEC §7). `Complete` means the bytes
@@ -255,13 +255,16 @@ whether a trailing `Incomplete` is a truncation for its protocol. Malformed inpu
 throws `SofabException` with `SofabError.InvalidMessage`.
 
 **That rejection is terminal** (CORELIB_PLAN §5.2). Once a `Feed` has thrown
-`InvalidMessage`, the `IStream` latches the verdict: `Status` answers
-`DecodeStatus.Invalid` from then on, and every later `Feed` throws
-`InvalidMessage` again — consuming nothing, emitting no visitor callback. Decode
-the next message with a new `IStream`. (`Invalid` is thus reported by `Status`,
-never returned by `Feed`, which throws instead.) A `SofabException` carrying
-`InvalidMessage` that a *visitor* raises — generated code judging a schema bound
-(MESSAGE_SPEC §7.1) or a strict-UTF-8 payload (§6.4) — latches the same way.
+`InvalidMessage`, the `IStream` latches the verdict, and every later `Feed`
+throws `InvalidMessage` again — consuming nothing, emitting no visitor callback.
+Decode the next message with a new `IStream`. (`Invalid` is thus never returned
+by `Feed`, which throws instead.) A `SofabException` carrying `InvalidMessage`
+that a *visitor* raises — generated code judging a schema bound (MESSAGE_SPEC
+§7.1) or a strict-UTF-8 payload (§6.4) — latches the same way.
+
+What `Feed` returns is the whole answer. There is no second accessor reporting
+the same outcome and no finish / finalize step (§5.2.4, §5.3.1): one fact, one
+way to learn it, so the two cannot drift apart.
 
 Generated decode code may also enforce receiver-side limits on unbounded (schema
 declares no `count` / `maxlen`) fields — `max_dyn_array_count`,
@@ -272,8 +275,8 @@ truncated. That category is **distinct** from `SofabError.InvalidMessage`:
 exceeding a configured cap is receiver policy, not wire malformation. This
 corelib enforces no limits and ships no default cap values — it only defines the
 category so generated code reports a violation uniformly. A limit rejection is
-terminal as well (§6.2.1) and closes the `IStream` to further feeds, but `Status`
-never reports `Invalid` for it — it stays `Incomplete` (§6.3).
+terminal as well (§6.2.1) and closes the `IStream` to further feeds; it reaches
+the caller as that exception rather than as `Invalid` (§6.3).
 
 ### Code generator
 
@@ -344,7 +347,6 @@ public sealed class Point
         private readonly Visitor _v;
         public Decoder() => _v = new Visitor(_m);
         public DecodeStatus Feed(byte[] chunk, int off, int len) => _is.Feed(chunk, off, len, _v);
-        public DecodeStatus Status => _is.Status;
         public Point Message => _m;
     }
 }

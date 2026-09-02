@@ -223,8 +223,10 @@ public class PayloadAccCapTests
     {
         // End to end, and the distinction §6.3 insists on: the decoder latches the
         // rejection like its own verdicts -- every later Feed re-raises it -- but the
-        // bytes are well-formed, so the outcome is NOT Invalid. It stopped part-way
-        // through a message it will not finish, which is Incomplete.
+        // bytes are well-formed, so the refusal travels as LimitExceeded on the
+        // error channel and is never reported as InvalidMessage / the Invalid
+        // outcome. Feed never returns at all here, so there is no status to fold
+        // the policy rejection into.
         byte[] wire = Encode(2048, os => os.WriteString(1, "0123456789"));
 
         var iss = new IStream();
@@ -232,12 +234,12 @@ public class PayloadAccCapTests
 
         var e = Assert.Throws<SofabException>(() => iss.Feed(wire, visitor));
         Assert.Equal(SofabError.LimitExceeded, e.Error);
+        Assert.NotEqual(SofabError.InvalidMessage, e.Error);
         Assert.Null(visitor.Value);
-        Assert.NotEqual(DecodeStatus.Invalid, iss.Status);
-        Assert.Equal(DecodeStatus.Incomplete, iss.Status);
 
         var again = Assert.Throws<SofabException>(() => iss.Feed(wire, visitor));
         Assert.Equal(SofabError.LimitExceeded, again.Error);
+        Assert.NotEqual(SofabError.InvalidMessage, again.Error);
     }
 
     [Fact]

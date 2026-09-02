@@ -394,12 +394,13 @@ public class SequenceGrowthTests
                 // Terminal means the stream is closed to further feeds: a caller
                 // that caught the first verdict and fed on gets it re-raised.
                 // It is deliberately NOT folded into the wire-conformance
-                // outcome (§6.3) -- these bytes are well-formed, so the status is
-                // never Invalid and never Complete.
-                Assert.NotEqual(DecodeStatus.Invalid, istream.Status);
-                Assert.NotEqual(DecodeStatus.Complete, istream.Status);
+                // outcome (§6.3) -- these bytes are well-formed, so the refusal
+                // stays LimitExceeded on the error channel and never becomes
+                // InvalidMessage, and Feed never returns Complete for it.
+                Assert.NotEqual(SofabError.InvalidMessage, thrown!.Error);
                 var again = Assert.Throws<SofabException>(() => istream.Feed(message, dest));
                 Assert.Equal(SofabError.LimitExceeded, again.Error);
+                Assert.NotEqual(SofabError.InvalidMessage, again.Error);
             }
         }
     }

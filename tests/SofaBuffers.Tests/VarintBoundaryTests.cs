@@ -21,6 +21,7 @@
  * SPDX-License-Identifier: MIT
  */
 
+using System;
 using SofaBuffers.Tests.Common;
 using Xunit;
 using static SofaBuffers.Tests.Common.TestBytes;
@@ -109,7 +110,9 @@ public class VarintBoundaryTests
             }
         });
         Assert.Equal(SofabError.InvalidMessage, ex.Error);
-        Assert.Equal(DecodeStatus.Invalid, iss.Status);
+        // The verdict is latched: every later Feed throws it again.
+        var again = Assert.Throws<SofabException>(() => iss.Feed(Array.Empty<byte>(), visitor));
+        Assert.Equal(SofabError.InvalidMessage, again.Error);
     }
 
     [Fact]

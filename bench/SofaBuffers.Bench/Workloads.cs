@@ -355,8 +355,7 @@ internal static class Workloads
             new("decode_composite_skip", "decode: composite skip-all", compWire.Length, () =>
             {
                 var istream = new IStream();
-                istream.Feed(compWire, skipAll);
-                return (long)istream.Status;
+                return (long)istream.Feed(compWire, skipAll);
             }),
         };
     }

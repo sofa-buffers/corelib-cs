@@ -163,7 +163,6 @@ public class RoundTripTests
         var c = new Capture();
         var iss = new IStream();
         Assert.Equal(DecodeStatus.Complete, iss.Feed(Array.Empty<byte>(), c));
-        Assert.Equal(DecodeStatus.Complete, iss.Status);
         Assert.Empty(c.SeqEvents);
         Assert.Empty(c.Unsigneds);
         Assert.Empty(c.Signeds);

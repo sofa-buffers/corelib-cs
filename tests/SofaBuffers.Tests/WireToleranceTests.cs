@@ -170,6 +170,5 @@ public class WireToleranceTests
             }
         });
         Assert.Equal(SofabError.InvalidMessage, streamed.Error);
-        Assert.Equal(DecodeStatus.Invalid, iss.Status);
     }
 }

@@ -54,7 +54,6 @@ public class SplitHeaderTests
 
         var ex = Assert.Throws<SofabException>(() => iss.Feed(new byte[] { 0x01 }, visitor));
         Assert.Equal(SofabError.InvalidMessage, ex.Error);
-        Assert.Equal(DecodeStatus.Invalid, iss.Status);
         Assert.Equal(255, visitor.Events.Count);          // the 256th never announced
 
         // Whole, the same bytes are rejected by the fast path.
@@ -80,7 +79,6 @@ public class SplitHeaderTests
             }
         });
         Assert.Equal(SofabError.InvalidMessage, ex.Error);
-        Assert.Equal(DecodeStatus.Invalid, iss.Status);
         Assert.Empty(visitor.Events);
     }
 

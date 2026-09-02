@@ -6,6 +6,7 @@
  * SPDX-License-Identifier: MIT
  */
 
+using System;
 using Xunit;
 using SofaBuffers.Tests.Common;
 using static SofaBuffers.Tests.Common.TestBytes;
@@ -36,7 +37,6 @@ public class IncompleteOutcomeTests
         var iss = new IStream();
         DecodeStatus status = iss.Feed(Bytes(0x80), v);
         Assert.Equal(DecodeStatus.Incomplete, status);
-        Assert.Equal(DecodeStatus.Incomplete, iss.Status);
         Assert.Empty(v.Events); // nothing decoded yet, but nothing rejected
     }
 
@@ -124,10 +124,13 @@ public class IncompleteOutcomeTests
     }
 
     [Fact]
-    public void StatusOnFreshDecoderIsComplete()
+    public void FreshDecoderReportsComplete()
     {
         // A decoder that has consumed nothing rests at a boundary (the empty
-        // message is COMPLETE, §7).
-        Assert.Equal(DecodeStatus.Complete, new IStream().Status);
+        // message is COMPLETE, §7). Feed is the only way to ask, so ask it with
+        // the empty message itself.
+        Assert.Equal(
+            DecodeStatus.Complete,
+            new IStream().Feed(Array.Empty<byte>(), new RecordingVisitor()));
     }
 }

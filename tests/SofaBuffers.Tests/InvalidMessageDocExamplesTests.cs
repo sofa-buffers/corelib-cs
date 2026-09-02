@@ -171,7 +171,6 @@ public class InvalidMessageDocExamplesTests
             var visitor = new RecordingVisitor();
             var iss = new IStream();
             Assert.Equal(DecodeStatus.Complete, iss.Feed(wire, visitor));
-            Assert.Equal(DecodeStatus.Complete, iss.Status);
             Assert.Equal(new[] { expected }, visitor.Events);
         }
     }
