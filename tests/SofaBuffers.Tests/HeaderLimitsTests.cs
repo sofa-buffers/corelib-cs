@@ -503,6 +503,13 @@ public class HeaderLimitsTests
     /// </summary>
     private static byte[] TerminalProbe() => Bytes(0x00, 0x00);
 
+    /// <summary>
+    /// A field id no case in the block uses, so a destination built on it reads
+    /// nothing and can refuse nothing -- see the terminality assertion, which needs
+    /// the second feed to have no ceiling of its own left to fire.
+    /// </summary>
+    private const int NeutralFieldId = 99;
+
     // --- the cases -----------------------------------------------------------
 
     [Theory]
@@ -566,11 +573,23 @@ public class HeaderLimitsTests
         if (c.Terminal)
         {
             // The rejection is terminal: a further feed RE-RAISES rather than
-            // consuming (§6.3, MESSAGE_SPEC §5.2). The probe is a whole valid
-            // message, so a decoder that resumed would answer Complete.
+            // consuming (§6.3, MESSAGE_SPEC §5.2).
+            //
+            // The probe goes to a NEUTRAL destination -- another field id, and a
+            // ceiling nothing can reach -- and that is the whole point of the
+            // assertion. Fed back to `dest`, whose ceiling is still armed, a
+            // decoder that did NOT latch would resume mid-field, hand the probe's
+            // bytes to the same destination as payload and be refused a second
+            // time with the SAME SofabError, so the question "re-raised, or
+            // resumed?" would have one answer in both worlds. With the ceiling out
+            // of reach on the second feed, the only thing that can still throw is
+            // the stream's latched verdict: a decoder that resumed reads the probe
+            // as a whole valid message and answers Complete instead.
+            var neutral = new HeaderDest(NeutralFieldId, Construct.String, Ceiling.Cap, int.MaxValue);
             SofabException again = Assert.Throws<SofabException>(
-                () => istream.Feed(TerminalProbe(), dest));
+                () => istream.Feed(TerminalProbe(), neutral));
             Assert.Equal(thrown!.Error, again.Error);
+            Assert.Equal(0, neutral.BoundValues);
         }
 
         // Nothing was bound in any case of this block: the rejections answer at the
