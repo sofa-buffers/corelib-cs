@@ -53,8 +53,9 @@
  * them all and runs every vector; a feature-reduced build would skip the rest.
  *
  * The vector file is a verbatim copy and carries top-level blocks this file does
- * not replay itself: "invalid_utf8" is run by StrictUtf8Tests and
- * "sequence_growth" (CORELIB_PLAN §7.2 item 8) by SequenceGrowthTests. The loader
+ * not replay itself: "invalid_utf8" is run by StrictUtf8Tests, "sequence_growth"
+ * (CORELIB_PLAN §7.2 item 8) by SequenceGrowthTests and "header_limits"
+ * (CORELIB_PLAN §6.2.1, §6.3) by HeaderLimitsTests. The loader
  * ignores what it does not run -- an unknown block is never a load failure -- but
  * it refuses anything it would have to shrink to fit: see the loader guards below.
  *
@@ -914,9 +915,10 @@ public class TestVectorsConformanceTests : IClassFixture<TestVectorsConformanceT
     /// loader ignores them instead of failing.
     /// </summary>
     /// <remarks>
-    /// Neither block is run by THIS file: <c>invalid_utf8</c> is run by
-    /// StrictUtf8Tests and <c>sequence_growth</c> (CORELIB_PLAN §7.2 item 8) by
-    /// SequenceGrowthTests. Tolerating a block a given file does not run is
+    /// None of them is run by THIS file: <c>invalid_utf8</c> is run by
+    /// StrictUtf8Tests, <c>sequence_growth</c> (CORELIB_PLAN §7.2 item 8) by
+    /// SequenceGrowthTests and <c>header_limits</c> (CORELIB_PLAN §6.2.1, §6.3)
+    /// by HeaderLimitsTests. Tolerating a block a given file does not run is
     /// what keeps §7.1's "copy it verbatim" possible -- the alternative is
     /// trimming the shared file to what this port replays, which is exactly the
     /// hand-editing §7.1 forbids.
@@ -926,6 +928,11 @@ public class TestVectorsConformanceTests : IClassFixture<TestVectorsConformanceT
     {
         using JsonDocument raw = RawVectorFile();
         Assert.True(raw.RootElement.TryGetProperty("sequence_growth", out _));
+        // Asserted present for the same reason the growth block is: the file is
+        // copied verbatim (§7.1, §8), so a copy that lost the block would
+        // silently stop testing that a declared-but-unpaid-for length is
+        // answered at the word rather than left as Incomplete.
+        Assert.True(raw.RootElement.TryGetProperty("header_limits", out _));
         Assert.NotEmpty(Vectors);
     }
 }

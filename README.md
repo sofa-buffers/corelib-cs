@@ -542,8 +542,21 @@ a delivery sequence of element ids rather than by a byte string — the port bui
 the message itself and asserts the resulting container length and outcome. In
 this port the wrapper-array destination belongs to generated code, so the test
 stands in for that layer while exercising the growth policy (`Seq.EnsureCap`) and
-the decoder's sequence events for real. Helpers shared between test files live in
-its `Common/`.
+the decoder's sequence events for real. `HeaderLimitsTests.cs` runs the fourth
+block (CORELIB_PLAN §6.2.1/§6.3): bytes that *declare* a length or a count and
+then end, with no payload behind them. The ceiling is decided at that word,
+before the payload is asked for, so the answer is the ceiling's and it is
+terminal — a further feed re-raises it rather than resuming. Which ceiling speaks
+is the subject: a schema `maxlen` makes the breach `InvalidMessage`, a §6.2.1
+receiver cap makes it `LimitExceeded`, and two cases carry identical bytes under
+the two ceilings to keep them apart. The string and blob cases route the declared
+length through `PayloadAcc.CheckStringLength` / `CheckBlobLength` from the
+decoder's `FixlenBegin` hook, so they bite on this library's own guard; the
+array-count cap and the schema bounds belong to the generated layer the test
+stands in for. Every rejection is paired with an in-cap control that must still
+answer `Incomplete`, and a negative control replays the rejections with the
+ceilings lifted to show the verdicts come from the guard. Helpers shared between
+test files live in its `Common/`.
 
 ## Benchmarks
 
