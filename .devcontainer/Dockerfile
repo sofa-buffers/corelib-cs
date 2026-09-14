@@ -12,6 +12,12 @@ ENV PATH=/root/.dotnet/tools:$PATH
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     curl \
+    ripgrep \
+    fd-find \
+    jq \
+    shellcheck \
+    shfmt \
+    xxd \
     gnupg \
     git \
     valgrind \
