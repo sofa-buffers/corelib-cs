@@ -240,6 +240,34 @@ public sealed class OStream
     }
 
     /// <summary>
+    /// Start a new message on this encoder: install <paramref name="buffer"/> at
+    /// <paramref name="offset"/> exactly as <see cref="BufferSet"/> does, and drop
+    /// every open sequence and held-back sequence header of the previous message —
+    /// including one abandoned mid-message by an exception.
+    /// </summary>
+    /// <remarks>
+    /// This is what lets a caller encoding many messages keep <b>one</b> encoder
+    /// instead of constructing one per message. Construction is where the encoder
+    /// lays down its fixed-size state (the <c>MAX_DEPTH</c>-entry pending run,
+    /// 1020 bytes, CORELIB_PLAN §6.6), so a per-message <c>new OStream</c> pays that
+    /// allocation and its zero-fill on every message; a reset pays nothing and
+    /// allocates nothing. The flush sink, if any, stays attached. The state it
+    /// leaves is indistinguishable from a freshly constructed encoder's: nothing
+    /// in the pending run is read before it is written again.
+    /// </remarks>
+    /// <param name="buffer">caller-owned output buffer</param>
+    /// <param name="offset">initial write position (<c>0..buffer.Length</c>)</param>
+    public void Reset(byte[] buffer, int offset)
+    {
+        CheckBuffer(buffer, offset, _sink != null);
+        _buffer = buffer;
+        _end = buffer.Length;
+        _offset = offset;
+        _depth = 0;
+        _nPending = 0;
+    }
+
+    /// <summary>
     /// Validate a buffer at the point it is handed over: non-null, an in-range
     /// start offset, and — for a buffer installed <b>with</b> a flush sink — at
     /// least <see cref="Sofab.MinOutputBuffer"/> writable bytes beyond that
