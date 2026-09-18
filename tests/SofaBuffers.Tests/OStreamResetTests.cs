@@ -57,11 +57,15 @@ public class OStreamResetTests
         os.Reset(buf, 0);
         Message(os);
         Assert.Equal(Fresh(), buf.AsSpan(0, os.BytesUsed).ToArray());
-        // Balanced: one more End would underflow like on a fresh encoder.
-        var fresh = new OStream(new byte[8]);
-        var e1 = Record.Exception(() => fresh.WriteSequenceEnd());
-        var e2 = Record.Exception(() => os.WriteSequenceEnd());
-        Assert.Equal(e1?.GetType(), e2?.GetType());
+        // The abandoned depth is gone too: the full MAX_DEPTH (255) still opens,
+        // which a stale depth of 2 would cut short, and the 256th is refused.
+        // Held-back begins write nothing, so the buffer size plays no part.
+        for (int i = 0; i < 255; i++)
+        {
+            os.WriteSequenceBeginLazy(1);
+        }
+        var e = Assert.Throws<SofabException>(() => os.WriteSequenceBeginLazy(1));
+        Assert.Equal(SofabError.Argument, e.Error);
     }
 
     [Fact]
