@@ -60,11 +60,15 @@ public enum SofabError
     /// perform the comparison where §6.2.1 wants it, for the two payload kinds
     /// whose length it already sees: <see cref="PayloadAcc.String"/> and
     /// <see cref="PayloadAcc.Blob"/> take the cap as a <em>required argument</em>
-    /// and check <c>total</c> at the length header, before a byte is taken. Array
-    /// element counts and indices have no such call here — <see cref="Seq"/> only
-    /// grows an array generated code owns — so those caps are enforced in
-    /// generated code, and, per §6.2.1's "one implementation, wherever it runs",
-    /// each rule is enforced in exactly one of the two places.
+    /// and check <c>total</c> at the length header, before a byte is taken. An
+    /// array element <em>index</em> is compared here too: <see cref="Seq.PlaceElem{T}"/>,
+    /// <see cref="Seq.ReserveElem{T}"/>, <see cref="Seq.ReserveRow{T}"/> and
+    /// <see cref="Seq.CheckIndex"/> take the schema count and the receiver cap and
+    /// apply exactly one of them before the list grows. Only a native array's
+    /// element <em>count</em>, announced at <see cref="IVisitor.ArrayBegin"/>, has
+    /// no such call and is compared in generated code — per §6.2.1's "one
+    /// implementation, wherever it runs", each rule is enforced in exactly one of
+    /// the two places.
     /// </para>
     /// <para>
     /// A cap that was never stated is a caller defect, reported as

@@ -21,10 +21,10 @@
  *     a caller defect in §6.3's InvalidArgument category -- not LimitExceeded,
  *     which would promise a limit to raise that nobody configured.
  *
- * Array element counts and indices are deliberately NOT here: this corelib has no
- * per-element call to hang them on (Seq only grows an array generated code owns),
- * so those caps stay in generated code -- §6.2.1's "one implementation, wherever it
- * runs", one rule enforced in exactly one layer.
+ * Array element indices are not here: they are compared by Seq's placement calls
+ * and pinned in SeqPlacementTests. A native array's element count has no corelib
+ * call to hang on and stays in generated code -- §6.2.1's "one implementation,
+ * wherever it runs", one rule enforced in exactly one layer.
  *
  * SPDX-License-Identifier: MIT
  */
