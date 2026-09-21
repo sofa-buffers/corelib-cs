@@ -55,8 +55,10 @@
  * The vector file is a verbatim copy and carries top-level blocks this file does
  * not replay itself: "invalid_utf8" is run by StrictUtf8Tests, "sequence_growth"
  * (CORELIB_PLAN §7.2 item 8) by SequenceGrowthTests, "header_limits"
- * (CORELIB_PLAN §6.2.1, §6.3) by HeaderLimitsTests and "boolean_tolerant"
- * (CORELIB_PLAN §4.4) by BooleanTolerantTests. The loader
+ * (CORELIB_PLAN §6.2.1, §6.3) by HeaderLimitsTests, "header_limits_nested"
+ * -- the same ceilings one and two sequence frames deeper -- by
+ * HeaderLimitsNestedTests and "boolean_tolerant" (CORELIB_PLAN §4.4) by
+ * BooleanTolerantTests. The loader
  * ignores what it does not run -- an unknown block is never a load failure -- but
  * it refuses anything it would have to shrink to fit: see the loader guards below.
  *
@@ -919,7 +921,8 @@ public class TestVectorsConformanceTests : IClassFixture<TestVectorsConformanceT
     /// None of them is run by THIS file: <c>invalid_utf8</c> is run by
     /// StrictUtf8Tests, <c>sequence_growth</c> (CORELIB_PLAN §7.2 item 8) by
     /// SequenceGrowthTests, <c>header_limits</c> (CORELIB_PLAN §6.2.1, §6.3) by
-    /// HeaderLimitsTests and <c>boolean_tolerant</c> (CORELIB_PLAN §4.4) by
+    /// HeaderLimitsTests, <c>header_limits_nested</c> by HeaderLimitsNestedTests
+    /// and <c>boolean_tolerant</c> (CORELIB_PLAN §4.4) by
     /// BooleanTolerantTests. Tolerating a block a given file does not run is
     /// what keeps §7.1's "copy it verbatim" possible -- the alternative is
     /// trimming the shared file to what this port replays, which is exactly the
@@ -935,6 +938,9 @@ public class TestVectorsConformanceTests : IClassFixture<TestVectorsConformanceT
         // silently stop testing that a declared-but-unpaid-for length is
         // answered at the word rather than left as Incomplete.
         Assert.True(raw.RootElement.TryGetProperty("header_limits", out _));
+        // And its nested counterpart, which carries the one axis the flat block
+        // cannot: the identical header delivered inside an open sequence.
+        Assert.True(raw.RootElement.TryGetProperty("header_limits_nested", out _));
         // Same reason again: a copy that lost this block would stop testing that
         // a non-canonical boolean -- 2, 256, 2^64-1 -- reads as true and
         // re-encodes as 1 (CORELIB_PLAN §4.4), and BooleanTolerantTests would
