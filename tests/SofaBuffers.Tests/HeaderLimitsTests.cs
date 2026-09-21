@@ -31,16 +31,20 @@
  *
  * WHERE THE CEILING LIVES IN THIS PORT, and what these cases therefore prove. The
  * corelib holds no limit -- no field, no default, no fallback constant (§6.2.1) --
- * so the numbers are generated code's and HeaderDest below stands in for that
- * layer, exactly as GrowthDest does in SequenceGrowthTests. What it does NOT
- * restate is the comparison itself for the two payload kinds: it routes the
- * declared length through PayloadAcc.CheckStringLength / CheckBlobLength, the
+ * so the numbers are generated code's and Common/HeaderCeiling.cs's HeaderDest
+ * stands in for that layer, exactly as GrowthDest does in SequenceGrowthTests. What
+ * it does NOT restate is the comparison itself for the two payload kinds: it routes
+ * the declared length through PayloadAcc.CheckStringLength / CheckBlobLength, the
  * §6.2.1 comparison the library offers at the length word, from the
  * IVisitor.FixlenBegin hook the decoder raises there. So the string and blob cases
  * exercise this library's own guard and the decoder's header hook for real; the
  * array-count cap and the schema bounds are the destination's, because the corelib
  * has no call for either (see SofabError.LimitExceeded, "each rule is enforced in
  * exactly one of the two places").
+ *
+ * That destination is SHARED with HeaderLimitsNestedTests, which runs the same
+ * headers one and two sequence frames deeper: the two blocks are required to differ
+ * in where the field arrives and in nothing else, so they must not have a leaf each.
  *
  * SPDX-License-Identifier: MIT
  */
@@ -52,6 +56,7 @@ using System.Linq;
 using System.Text.Json;
 using Xunit;
 using Xunit.Abstractions;
+using SofaBuffers.Tests.Common;
 using static SofaBuffers.Tests.Common.TestBytes;
 
 namespace SofaBuffers.Tests;
@@ -63,23 +68,9 @@ public class HeaderLimitsTests
     public HeaderLimitsTests(ITestOutputHelper output) => _out = output;
 
     /// <summary>
-    /// This port's answer to the <c>receiver_caps</c> capability the block gates
-    /// on.
-    /// </summary>
-    /// <remarks>
-    /// Like <c>dynamic_arrays</c> on the growth block, and unlike the
-    /// wire-construct tags a vector carries, this is a PROFILE capability: a port
-    /// declares it when its generated code carries §6.2.1 receiver caps DISTINCT
-    /// from schema bounds. This one does. A cap is a required argument that is
-    /// never held and never defaulted (<see cref="PayloadAcc"/>), a schema bound is
-    /// generated code's own number, the two are mutually exclusive per field, and a
-    /// breach of one is <see cref="SofabError.LimitExceeded"/> where a breach of the
-    /// other is <see cref="SofabError.InvalidMessage"/>.
-    /// </remarks>
-    private const bool CarriesReceiverCaps = true;
-
-    /// <summary>
-    /// Whether this port satisfies one <c>requires</c> tag of the block.
+    /// Whether this port satisfies one <c>requires</c> tag of the block. The
+    /// answers themselves live in <see cref="PortCapability"/>, shared with the
+    /// nested block, which asks the same questions.
     /// </summary>
     /// <remarks>
     /// IN THIS BLOCK AN UNSATISFIED TAG MEANS SKIP, FOR EVERY TAG -- which is not
@@ -89,39 +80,17 @@ public class HeaderLimitsTests
     /// rejection WITH A SPECIFIC CATEGORY, so such a build would reject for an
     /// unrelated reason and appear to pass while testing nothing.
     /// <para>
-    /// This is a full-wire-format implementation, so the construct tags
-    /// (<c>fixlen</c>, <c>array</c>, <c>int64</c>) are all satisfied and only the
-    /// profile tag is a real question here.
+    /// A tag this port does not recognize is treated as unsatisfied here, so a case
+    /// resting on something unknown is skipped rather than half-run; every tag the
+    /// block uses today is a known one, and the run/skipped line below is what makes
+    /// a skip visible.
     /// </para>
     /// </remarks>
-    private static bool Satisfies(string tag) => tag switch
-    {
-        "receiver_caps" => CarriesReceiverCaps,
-        "fixlen" or "array" or "sequence" or "fp64" or "int64" => true,
-        _ => false,
-    };
+    private static bool Satisfies(string tag) => PortCapability.Known(tag) ?? false;
 
     private static bool Runs(Case c) => c.Requires.TrueForAll(Satisfies);
 
     // --- the block's shape (test_vectors_README.md) --------------------------
-
-    /// <summary>Which ceiling the case configures: exactly one of the two.</summary>
-    private enum Ceiling
-    {
-        /// <summary>A schema <c>maxlen</c> / <c>count</c>; a breach is INVALID.</summary>
-        Schema,
-
-        /// <summary>A §6.2.1 receiver cap; a breach is LIMIT_EXCEEDED.</summary>
-        Cap,
-    }
-
-    /// <summary>The construct the case's bytes open, read off the bytes themselves.</summary>
-    private enum Construct
-    {
-        String,
-        Blob,
-        Array,
-    }
 
     private sealed record Case(
         string Name,
@@ -136,36 +105,6 @@ public class HeaderLimitsTests
         string[] Chunks,
         string Outcome,
         bool Terminal);
-
-    /// <summary>
-    /// Read the single ceiling a case states, under the key naming the bound.
-    /// </summary>
-    /// <remarks>
-    /// A case carries <c>schema</c> or <c>limits</c> and never both -- §6.2.1
-    /// forbids applying a receiver cap to a field the schema already bounds -- and
-    /// the object names exactly one bound. Both are checked here rather than
-    /// assumed, because a case that stated two ceilings would silently test
-    /// whichever this file happened to read first.
-    /// </remarks>
-    private static (Ceiling Kind, string Name, long Bound) ReadCeiling(JsonElement c, string name)
-    {
-        bool hasSchema = c.TryGetProperty("schema", out JsonElement schema);
-        bool hasLimits = c.TryGetProperty("limits", out JsonElement limits);
-        if (hasSchema == hasLimits)
-        {
-            throw new InvalidOperationException(
-                $"{name}: a case carries exactly one of `schema` and `limits` (§6.2.1)");
-        }
-
-        JsonElement owner = hasSchema ? schema : limits;
-        JsonProperty[] bounds = owner.EnumerateObject().ToArray();
-        if (bounds.Length != 1)
-        {
-            throw new InvalidOperationException(
-                $"{name}: the ceiling names {bounds.Length} bounds, want exactly one");
-        }
-        return (hasSchema ? Ceiling.Schema : Ceiling.Cap, bounds[0].Name, bounds[0].Value.GetInt64());
-    }
 
     private static List<Case> Load()
     {
@@ -192,7 +131,7 @@ public class HeaderLimitsTests
                 ? ch.EnumerateArray().Select(x => x.GetString()!).ToArray()
                 : Array.Empty<string>();
 
-            (Ceiling kind, string ceiling, long bound) = ReadCeiling(c, name);
+            (Ceiling kind, string ceiling, long bound) = HeaderCeiling.ReadCeiling(c, name);
             JsonElement e = c.GetProperty("expect");
 
             cases.Add(new Case(
@@ -234,234 +173,11 @@ public class HeaderLimitsTests
 
     /// <summary>
     /// The construct the case's bytes declare, together with the id and the
-    /// length-or-count word they carry.
+    /// length-or-count word they carry -- read by the shared reader, at the top
+    /// level (no frames), and cross-checked against what the case states.
     /// </summary>
-    /// <remarks>
-    /// The bounds in this block are ABSOLUTE, not cap-relative as in
-    /// <c>sequence_growth</c>: the case IS a fixed byte string, so the declared
-    /// number is baked into the varint and the case instead TELLS the port which
-    /// ceiling to configure. What the case does not spell out is which CONSTRUCT
-    /// the header opens, so it is read off the bytes -- the one description that
-    /// cannot drift from them -- and cross-checked against <c>field_id</c> and
-    /// <c>declared</c>.
-    /// </remarks>
-    private static (Construct Kind, int Id, long Declared) ReadShape(Case c)
-    {
-        byte[] raw = Convert.FromHexString(c.Serialized);
-        int at = 0;
-        ulong header = Varint(c.Name, raw, ref at);
-        int id = checked((int)(header >> 3));
-        Construct kind;
-        long declared;
-
-        switch (header & 0x07)
-        {
-            case 0x2: // T_FIXLEN
-                ulong word = Varint(c.Name, raw, ref at);
-                declared = checked((long)(word >> 3));
-                kind = (word & 0x07) switch
-                {
-                    0x2 => Construct.String,
-                    0x3 => Construct.Blob,
-                    _ => throw new InvalidOperationException(
-                        $"{c.Name}: fixlen subtype {word & 0x07} carries no ceiling of its own"),
-                };
-                break;
-            case 0x3: // T_VARINTARRAY_UNSIGNED
-            case 0x4: // T_VARINTARRAY_SIGNED
-                declared = checked((long)Varint(c.Name, raw, ref at));
-                kind = Construct.Array;
-                break;
-            default:
-                throw new InvalidOperationException(
-                    $"{c.Name}: wire type {header & 0x07} opens no length or count header");
-        }
-
-        // The case states the id and the number its bytes declare; a disagreement
-        // means the block was hand-edited rather than copied verbatim (§7.1, §8).
-        if (id != c.FieldId)
-        {
-            throw new InvalidOperationException($"{c.Name}: bytes carry id {id}, the case says {c.FieldId}");
-        }
-        if (declared != c.Declared)
-        {
-            throw new InvalidOperationException(
-                $"{c.Name}: bytes declare {declared}, the case says {c.Declared}");
-        }
-        return (kind, id, declared);
-    }
-
-    /// <summary>
-    /// One varint out of the case's header. The header is complete in
-    /// <c>serialized</c> even where <c>chunks</c> splits it, so a truncated varint
-    /// here is a corrupt case rather than an expected outcome.
-    /// </summary>
-    private static ulong Varint(string name, byte[] b, ref int at)
-    {
-        ulong v = 0;
-        int shift = 0;
-        while (at < b.Length)
-        {
-            byte x = b[at++];
-            v |= (ulong)(x & 0x7F) << shift;
-            if ((x & 0x80) == 0) { return v; }
-            shift += 7;
-            if (shift > 63)
-            {
-                throw new InvalidOperationException($"{name}: varint wider than 64 bits");
-            }
-        }
-        throw new InvalidOperationException($"{name}: serialized ends inside a varint");
-    }
-
-    // --- the destination the ceiling lives in --------------------------------
-
-    /// <summary>
-    /// The destination a generated message class would be for the case's one
-    /// field: it judges the declared length or count at the header hook, and binds
-    /// the payload behind it.
-    /// </summary>
-    /// <remarks>
-    /// <para>
-    /// The ceiling is applied at <see cref="IVisitor.FixlenBegin"/> /
-    /// <see cref="IVisitor.ArrayBegin"/> -- the word that declares the size, which
-    /// §6.2.1 names as the enforcement point ("before the allocation it is meant to
-    /// prevent") and which the decoder raises before any payload byte. For a string
-    /// or a blob the comparison itself is not restated here: it is
-    /// <see cref="PayloadAcc.CheckStringLength"/> / <see cref="PayloadAcc.CheckBlobLength"/>,
-    /// the library's own §6.2.1 check, so these cases bite on the library rather
-    /// than on an assertion written in this file.
-    /// </para>
-    /// <para>
-    /// The two ceilings are wired in mutually exclusively, exactly as the case
-    /// states them: a <c>schema</c> case gets a bound this destination enforces
-    /// itself and NO cap, a <c>limits</c> case gets the cap and NO schema bound.
-    /// Neither route can borrow the other's number.
-    /// </para>
-    /// </remarks>
-    private sealed class HeaderDest : IVisitor
-    {
-        private readonly int _fieldId;
-        private readonly Construct _construct;
-        private readonly Ceiling _kind;
-        private readonly long _bound;
-        private readonly PayloadAcc _acc = new();
-
-        /// <summary>
-        /// How many values this destination actually bound. Every case in the
-        /// block ends at or before the length word, so it must stay 0 -- which is
-        /// only worth asserting because the counter genuinely moves when a payload
-        /// does arrive (<see cref="TheDestinationBindsWhenThePayloadArrives"/>).
-        /// </summary>
-        internal int BoundValues { get; private set; }
-
-        internal HeaderDest(int fieldId, Construct construct, Ceiling kind, long bound)
-        {
-            _fieldId = fieldId;
-            _construct = construct;
-            _kind = kind;
-            _bound = bound;
-        }
-
-        /// <summary>The declared length judged at the length word, before any payload byte.</summary>
-        public void FixlenBegin(int id, FixlenType subtype, int total)
-        {
-            if (id != _fieldId || !IsOurs(subtype))
-            {
-                // A field this destination does not read: MESSAGE_SPEC §7.3 skips
-                // it, and §6.2.1 never caps a skipped field.
-                return;
-            }
-            if (_kind == Ceiling.Schema)
-            {
-                // A schema bound is a statement about VALIDITY (MESSAGE_SPEC §7.1):
-                // the number that exceeds it is already on the wire and no later
-                // byte can make it legal, so the field is malformed, not declined.
-                if (total > _bound)
-                {
-                    throw new SofabException(SofabError.InvalidMessage,
-                        $"declared length {total} over schema maxlen {_bound}");
-                }
-                return;
-            }
-            // A receiver cap: the bytes are well-formed and the same header decodes
-            // under a looser cap, so the refusal is LimitExceeded (§6.2.1, §6.3).
-            if (subtype == FixlenType.String)
-            {
-                PayloadAcc.CheckStringLength(total, _bound);
-            }
-            else
-            {
-                PayloadAcc.CheckBlobLength(total, _bound);
-            }
-        }
-
-        /// <summary>
-        /// The declared element count, judged the same way and at the same point.
-        /// </summary>
-        /// <remarks>
-        /// A COUNT ahead of its payload is bound exactly as a length is (§6.2.1) --
-        /// and unlike a wrapper array, which carries no count on the wire and is
-        /// bound at the element index instead (SequenceGrowthTests). The corelib
-        /// offers no call for this one: array counts are generated code's
-        /// throughout (see <see cref="SofabError.LimitExceeded"/>), so the
-        /// comparison is here.
-        /// </remarks>
-        public void ArrayBegin(int id, ArrayKind kind, int count)
-        {
-            if (id != _fieldId || _construct != Construct.Array)
-            {
-                return;
-            }
-            if (count > _bound)
-            {
-                throw new SofabException(
-                    _kind == Ceiling.Schema ? SofabError.InvalidMessage : SofabError.LimitExceeded,
-                    _kind == Ceiling.Schema
-                        ? $"declared count {count} over schema count {_bound}"
-                        : $"declared count {count} over max_dyn_array_count {_bound}");
-            }
-        }
-
-        public void String(int id, int total, int offset, byte[] data, int chunkOffset, int chunkLength)
-        {
-            if (id != _fieldId || _construct != Construct.String) { return; }
-            if (_acc.String(total, offset, data, chunkOffset, chunkLength, _bound) != null)
-            {
-                BoundValues++;
-            }
-        }
-
-        public void Blob(int id, int total, int offset, byte[] data, int chunkOffset, int chunkLength)
-        {
-            if (id != _fieldId || _construct != Construct.Blob) { return; }
-            if (_acc.Blob(total, offset, data, chunkOffset, chunkLength, _bound) != null)
-            {
-                BoundValues++;
-            }
-        }
-
-        public void Unsigned(int id, ulong value)
-        {
-            if (id == _fieldId && _construct == Construct.Array) { BoundValues++; }
-        }
-
-        public void Signed(int id, long value)
-        {
-            if (id == _fieldId && _construct == Construct.Array) { BoundValues++; }
-        }
-
-        /// <summary>
-        /// Whether an arrived fixlen subtype is the one this destination reads. The
-        /// corelib is schema-agnostic and reports the subtype that ARRIVED, so a
-        /// receiver whose schema names another one treats the field as a
-        /// MESSAGE_SPEC §7.3 skip and does not measure it against this field's
-        /// bound.
-        /// </summary>
-        private bool IsOurs(FixlenType subtype) =>
-            (_construct == Construct.String && subtype == FixlenType.String)
-            || (_construct == Construct.Blob && subtype == FixlenType.Blob);
-    }
+    private static (Construct Kind, int Id, long Declared) ReadShape(Case c) =>
+        HeaderCeiling.ReadShape(c.Name, c.Serialized, Array.Empty<int>(), c.FieldId, c.Declared);
 
     // --- feeding the case ----------------------------------------------------
 
