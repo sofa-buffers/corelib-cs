@@ -16,13 +16,13 @@
  *
  * WHAT THIS PORT OWNS, AND WHAT IT DOES NOT -- stated plainly, because the split
  * decides what these cases actually prove here. In C# the wrapper-array
- * destination is generated code's: sofab ships the growth POLICY (Seq.EnsureCap,
- * doubling and clamped) and the decode event stream (IStream/IVisitor), while the
- * element-index cap and the placement live in the generated layer. GrowthDest
- * below therefore stands in for that generated layer, exactly as the README's
- * generator example does. What the cases pin is the CONTRACT that layer must
- * meet, and they exercise Seq.EnsureCap and the decoder's sequence events for
- * real; they do not pin a decoder-side collector, because this port has none.
+ * destination (a List<T>) and the routing into it are generated code's, while
+ * the element-index bound, the gap fill and the growth are sofab's: Seq.PlaceElem
+ * for a string element, Seq.ReserveElem for a struct element, Seq.CheckIndex at a
+ * string's first piece. GrowthDest below stands in for the generated layer and
+ * makes exactly those calls, so the cases exercise the corelib's placement and the
+ * decoder's sequence events for real; only the routing is the test's own.
+ * SeqPlacementTests pins the same helpers directly, without a decode.
  *
  * SPDX-License-Identifier: MIT
  */
@@ -199,39 +199,38 @@ public class SequenceGrowthTests
     // --- the destination, standing in for the generated layer ----------------
 
     /// <summary>
-    /// The wrapper-array destination a generated message class would be: it
-    /// bounds the element INDEX, then grows through <see cref="Seq.EnsureCap"/>
-    /// and places at the id.
+    /// The wrapper-array destination a generated message class would be: a
+    /// <see cref="List{T}"/> filled through the corelib's own placement calls —
+    /// <see cref="Seq.PlaceElem{T}"/> for a string element,
+    /// <see cref="Seq.ReserveElem{T}"/> for a struct element — exactly as the
+    /// generator emits them.
     /// </summary>
     /// <remarks>
-    /// The order of those two steps is the whole point of the growth/reject case:
-    /// §6.2.1 bounds the index "before the container it indexes into is extended",
-    /// so a rejected id must leave no partial extension behind. The logical length
-    /// is tracked separately from the buffer's capacity, because EnsureCap doubles
-    /// -- generated code trims to the length when the array ends, which is what
-    /// makes the decoded length exactly highest present id + 1.
+    /// The routing (which depth, which field) is this class's, as it is generated
+    /// code's; the index bound, the gap fill and the growth are
+    /// <see cref="Seq"/>'s. The field is schema-uncounted, so every call passes
+    /// <c>cap = -1</c> and this port's receiver <see cref="Cap"/> as
+    /// <c>rcap</c>, and a breach is <see cref="SofabError.LimitExceeded"/>.
     /// </remarks>
     private sealed class GrowthDest : IVisitor
     {
+        /// <summary>The schema declares no count for the block's field.</summary>
+        private const long NoCount = -1;
+
+        private sealed class Elem
+        {
+            internal ulong Value;
+        }
+
         private readonly int _fieldId;
         private readonly bool _structElements;
-        private string[] _strings = Array.Empty<string>();
-        private ulong[] _numbers = Array.Empty<ulong>();
+        private readonly List<string> _strings = new();
+        private readonly List<Elem> _elems = new();
+        private readonly PayloadAcc _acc = new();
         private int _depth;
         private int _element = -1;
-        private byte[] _payload = Array.Empty<byte>();
 
-        internal int Length { get; private set; }
-
-        /// <summary>
-        /// The destination BUFFER's length, which is not the same as
-        /// <see cref="Length"/>: EnsureCap doubles, so the buffer may legitimately
-        /// run ahead of the logical length. Asserted separately on a rejection,
-        /// because a partial extension is a fact about the buffer -- a logical
-        /// length updated only after a successful placement would report the right
-        /// number even if the buffer had already grown toward the rejected index.
-        /// </summary>
-        internal int Capacity => _structElements ? _numbers.Length : _strings.Length;
+        internal int Length => _structElements ? _elems.Count : _strings.Count;
 
         internal GrowthDest(int fieldId, bool structElements)
         {
@@ -239,42 +238,9 @@ public class SequenceGrowthTests
             _structElements = structElements;
         }
 
-        internal string StringAt(int i) => i < _strings.Length ? _strings[i] : string.Empty;
+        internal string StringAt(int i) => i < _strings.Count ? _strings[i] : string.Empty;
 
-        internal ulong NumberAt(int i) => i < _numbers.Length ? _numbers[i] : 0;
-
-        /// <summary>
-        /// The element-index bound (§6.2.1): a wrapper array has no count header,
-        /// so the INDEX is what has to be bounded, and a breach is a policy
-        /// rejection -- LimitExceeded, never INVALID, because the bytes are
-        /// well-formed and decode under a looser cap (§6.3).
-        /// </summary>
-        private void Place(int id)
-        {
-            if (id >= Cap)
-            {
-                throw new SofabException(SofabError.LimitExceeded,
-                    $"element index {id} at or past max_dyn_array_count {Cap}");
-            }
-            if (_structElements)
-            {
-                // A numeric element default is the zero Array.Resize already
-                // writes, so growth alone initialises the slots.
-                _numbers = Seq.EnsureCap(_numbers, id, Cap);
-            }
-            else
-            {
-                // MESSAGE_SPEC §5.1: every destination slot is initialised to its
-                // ELEMENT DEFAULT before the array is applied. For a string that
-                // is "", not null -- Array.Resize writes default(T), so the new
-                // slots are filled explicitly. Getting this wrong is invisible
-                // until a gap case looks at the slot nothing was written to.
-                int grown = _strings.Length;
-                _strings = Seq.EnsureCap(_strings, id, Cap);
-                for (int i = grown; i < _strings.Length; i++) { _strings[i] = string.Empty; }
-            }
-            if (id + 1 > Length) { Length = id + 1; }
-        }
+        internal ulong NumberAt(int i) => i < _elems.Count ? _elems[i].Value : 0;
 
         public void SequenceBegin(int id)
         {
@@ -282,7 +248,7 @@ public class SequenceGrowthTests
             // depth 1 is the wrapper itself; depth 2 is a struct element.
             if (_depth == 2 && _structElements)
             {
-                Place(id);
+                Seq.ReserveElem(_elems, id, static () => new Elem(), NoCount, Cap);
                 _element = id;
             }
         }
@@ -297,7 +263,7 @@ public class SequenceGrowthTests
         {
             if (_depth == 2 && _structElements && _element >= 0 && id == 0)
             {
-                _numbers[_element] = value;
+                _elems[_element].Value = value;
             }
         }
 
@@ -308,21 +274,13 @@ public class SequenceGrowthTests
             // a rejection must not depend on the payload arriving whole.
             if (offset == 0)
             {
-                Place(id);
-                _payload = new byte[total];
+                Seq.CheckIndex(id, NoCount, Cap);
             }
-            Array.Copy(data, chunkOffset, _payload, offset, chunkLength);
-            if (offset + chunkLength == total)
+            string? s = _acc.String(total, offset, data, chunkOffset, chunkLength, int.MaxValue);
+            if (s is not null)
             {
-                _strings[id] = Encoding.UTF8.GetString(_payload);
+                Seq.PlaceElem(_strings, id, string.Empty, s, NoCount, Cap);
             }
-        }
-
-        /// <summary>Trim the capacity down to the logical length, as generated code does when the array ends.</summary>
-        internal void Finish()
-        {
-            if (_structElements) { Array.Resize(ref _numbers, Length); }
-            else { Array.Resize(ref _strings, Length); }
         }
 
         internal int FieldId => _fieldId;
@@ -356,7 +314,6 @@ public class SequenceGrowthTests
         if (c.Outcome == "complete")
         {
             Assert.Null(thrown);
-            dest.Finish();
             Assert.Equal(c.Length!.Value, dest.Length);
 
             // A gap below the cap holds the element default, and neither shortens
@@ -382,12 +339,6 @@ public class SequenceGrowthTests
             {
                 Assert.True(dest.Length <= max,
                     $"container length {dest.Length}, want at most {max} -- extended toward the rejected index");
-                // And the buffer behind it: §6.2.1 bounds the index "before the
-                // container it indexes into is extended", so a rejected id must
-                // leave no allocation behind either.
-                Assert.True(dest.Capacity <= max,
-                    $"destination buffer grew to {dest.Capacity}, want at most {max} -- "
-                    + "the index was bounded after the container was extended");
             }
             if (c.Terminal)
             {

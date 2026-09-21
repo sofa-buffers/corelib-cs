@@ -390,13 +390,18 @@ for everything fed so far.
 
 ### Generated-code support layer
 
-Around every codec call, generated code does the same few things: grow the array
-it is filling as elements arrive, reassemble a payload that arrived in pieces,
-turn validated bytes into a `string`. None of that is schema-specific, so it lives
-here rather than being emitted into every generated source tree.
+Around every codec call, generated code does the same few things: put an array
+element at the index its id names, grow the array it is filling as elements
+arrive, reassemble a payload that arrived in pieces, turn validated bytes into a
+`string`. None of that is schema-specific, so it lives here rather than being
+emitted into every generated source tree.
 
 | symbol | what it is |
 |---|---|
+| `Seq.PlaceElem<T>(list, id, empty, value, cap, rcap)` | place a `string` / `blob` element at its id: bound the index, fill the gap omitted interior elements left with `empty`, replace on a repeated id |
+| `Seq.ReserveElem<T>(list, id, make, cap, rcap)` | reserve the slot a `struct` / `union` / nested-array element is routed into: bound the index, grow to `id + 1` with one `make()` per new slot, leave an existing slot alone |
+| `Seq.ReserveRow<T>(rows, id, cap, rcap)` | reserve a matrix row: bound the row index, fill gaps with distinct empty rows, empty a re-opened row in place |
+| `Seq.CheckIndex(id, cap, rcap)` | the index bound on its own, for a string/blob element's length word; `cap` is the schema count (`InvalidMessage`), or negative, in which case `rcap` is the receiver cap (`LimitExceeded`) — exactly one applies |
 | `Seq.EnsureCap<T>(array, index, cap)` | the array-growth policy: double, stop at the announced count, and never allocate from a count the wire claimed but has not delivered |
 | `Seq.ArrayInitCap` | the bounded first reservation for an array the schema does not bound (16 elements) |
 | `PayloadAcc` | reassembles a `string` / `blob` payload split across `Feed` calls — a payload that arrives whole never touches its buffer, and the value never depends on where the split fell; takes the receiver cap for the field and checks the announced length against it before taking a byte |
@@ -432,15 +437,18 @@ tag test, since a skipped field is never capped:
 |---|---|---|
 | `max_dyn_string_len` | `total` in `PayloadAcc.String(..., cap)` | here — the call generated code already makes for every string |
 | `max_dyn_blob_len` | `total` in `PayloadAcc.Blob(..., cap)` | here — likewise for every blob |
-| `max_dyn_array_count` | the announced count / the element index | **generated code** |
+| `max_dyn_array_count` | the element index | here — `Seq.PlaceElem` / `ReserveElem` / `ReserveRow` / `CheckIndex`, the calls generated code makes for every wrapper-array element and matrix row |
+| `max_dyn_array_count` | a native array's announced count | **generated code** |
 
-The split is deliberate. A string or blob length arrives at a call this library
-already owns, so the compare folds in beside a bound test already there. An array
-has no such call — `Seq.EnsureCap` grows an array generated code owns and is not
-reached for every element — and inventing a `Reserve`/`Cap.Check` helper to host
-the check costs more than the inline guard it would replace. §6.2.1's *"one
-implementation, wherever it runs"* is satisfied either way: each rule is enforced
-in exactly one of the two layers, never both.
+A string or blob length and an element index both arrive at a call this library
+owns, so the compare sits beside the placement it guards. The placement calls
+take the schema count and the receiver cap together and compare exactly one —
+the schema's where it declares a count (`InvalidMessage`), the receiver's where it
+does not (`LimitExceeded`) — so generated code carries no index comparison of its
+own. A native array's element count arrives at `ArrayBegin`, which reaches no call
+here, and stays compared in generated code. §6.2.1's *"one implementation,
+wherever it runs"* holds either way: each rule is enforced in exactly one of the
+two layers, never both.
 
 The `cap` parameter is **required** — there is no unset state and no unlimited
 mode. A negative cap is a caller defect and raises `SofabError.Argument`, not
@@ -541,8 +549,9 @@ Two ports that grow differently emit identical bytes, so those cases are keyed b
 a delivery sequence of element ids rather than by a byte string — the port builds
 the message itself and asserts the resulting container length and outcome. In
 this port the wrapper-array destination belongs to generated code, so the test
-stands in for that layer while exercising the growth policy (`Seq.EnsureCap`) and
-the decoder's sequence events for real. `HeaderLimitsTests.cs` runs the fourth
+stands in for that layer's routing while the index bound, gap fill and growth are
+the corelib's own `Seq.PlaceElem` / `Seq.ReserveElem`, and the decoder's sequence
+events run for real; `SeqPlacementTests.cs` pins the same helpers directly. `HeaderLimitsTests.cs` runs the fourth
 block (CORELIB_PLAN §6.2.1/§6.3): bytes that *declare* a length or a count and
 then end, with no payload behind them. The ceiling is decided at that word,
 before the payload is asked for, so the answer is the ceiling's and it is
