@@ -7,13 +7,20 @@ disable-model-invocation: true
 
 # Release SofaBuffers.Corelib
 
-Target version: `$ARGUMENTS` (bare `X.Y.Z`, no leading `v`). If it is empty, propose
-one from the rules below and ask before doing anything.
+Target version: `$ARGUMENTS` (bare `X.Y.Z`; if given as `vX.Y.Z` or `VX.Y.Z`, drop the
+prefix — the tag gets its lowercase `v` back in step 4). If it is empty, propose one
+from the rules below and ask before doing anything.
 
 ## What a release is here
 
 - **The git tag `vX.Y.Z` is the source of truth.** Everything else is brought in line
   with it *before* the tag is set.
+- **Tags always start with a lowercase `v`**, followed by the bare version: `v1.2.3`
+  — never `1.2.3`, `V1.2.3` or `release-1.2.3`. The csproj `<Version>`, the commit
+  title and the branch/PR carry the number as used there (`1.2.3`,
+  `chore(release): 1.2.3`, `release/v1.2.3`); only the tag and the GitHub release
+  name are `v1.2.3`. `version-consistency.yml` triggers on `v*` and strips that `v`,
+  so a tag without it is never checked.
 - **The only version in the tree is `<Version>` in `src/SofaBuffers/SofaBuffers.csproj`.**
   Nothing else carries the package version — no `Directory.Build.props`, no
   `AssemblyInfo`, no version in README, `docs/docfx.json` or a changelog file.
