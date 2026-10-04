@@ -393,7 +393,7 @@ for everything fed so far.
 Around every codec call, generated code does the same few things: put an array
 element at the index its id names, grow the array it is filling as elements
 arrive, reassemble a payload that arrived in pieces, turn validated bytes into a
-`string`. None of that is schema-specific, so it lives here rather than being
+`string`, and decide whether a float array equals its default. None of that is schema-specific, so it lives here rather than being
 emitted into every generated source tree.
 
 | symbol | what it is |
@@ -406,6 +406,7 @@ emitted into every generated source tree.
 | `Seq.ArrayInitCap` | the bounded first reservation for an array the schema does not bound (16 elements) |
 | `PayloadAcc` | reassembles a `string` / `blob` payload split across `Feed` calls — a payload that arrives whole never touches its buffer, and the value never depends on where the split fell; takes the receiver cap for the field and checks the announced length against it before taking a byte |
 | `Utf8.Decode(data, offset, length)` | validate a byte range and materialize it, in that order — the only order in which invalid UTF-8 can still be rejected (§6.4) |
+| `FloatBits.BitsEqual(float[] / double[] / spans)` | bit-pattern equality of two float arrays (`float` and `double` overloads): lengths first, then the IEEE-754 bits of every element, so `-0.0` differs from `0.0` and a NaN equals only a NaN with the same bits — the omit-if-default test for a float array field (MESSAGE_SPEC §2) |
 
 ```csharp
 private readonly PayloadAcc _acc = new();
