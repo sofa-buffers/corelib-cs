@@ -90,8 +90,11 @@ public class WriteStringMaxlenTests
     {
         var os = new OStream(new byte[16]);
         var ex = Assert.Throws<SofabException>(() => os.WriteString(0, "xxxé", 4));
-        Assert.Contains("5", ex.Message);
-        Assert.Contains("maxlen 4", ex.Message);
+        Assert.Contains("UTF-8 length 5 above maxlen 4", ex.Message);
+
+        // Refused on its char count alone, the length is reported as a lower bound.
+        ex = Assert.Throws<SofabException>(() => os.WriteString(0, new string('\u00e9', 40), 4));
+        Assert.Contains("UTF-8 length at least 40 above maxlen 4", ex.Message);
     }
 
     [Fact]

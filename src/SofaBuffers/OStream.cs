@@ -947,7 +947,7 @@ public sealed class OStream
             // Every UTF-16 code unit encodes to at least one UTF-8 byte, so the
             // value is over the bound before it is measured. Also catches a
             // negative maxlen.
-            throw OverMaxlen(text.Length, maxlen);
+            throw OverMaxlen(text.Length, maxlen, exact: false);
         }
 
         // ASCII fast path. Every char below U+0080 encodes to itself as one byte,
@@ -1014,16 +1014,19 @@ public sealed class OStream
     /// The refusal of <see cref="WriteString(int, string, int)"/> for a value over
     /// its bound, built out of line so the hot path carries only the throw.
     /// </summary>
-    /// <param name="length">the UTF-8 length measured (or its lower bound)</param>
+    /// <param name="length">the UTF-8 length measured, or its lower bound</param>
     /// <param name="maxlen">the bound it was measured against</param>
+    /// <param name="exact">whether <paramref name="length"/> is the measured length
+    /// rather than the UTF-16 code-unit count that bounds it from below</param>
     /// <returns>the exception to throw</returns>
     [MethodImpl(MethodImplOptions.NoInlining)]
-    private static SofabException OverMaxlen(int length, int maxlen) =>
+    private static SofabException OverMaxlen(int length, int maxlen, bool exact) =>
         maxlen < 0
             ? new SofabException(SofabError.Argument, "string maxlen " + maxlen)
             : new SofabException(
                 SofabError.Argument,
-                "string: UTF-8 length " + length + " above maxlen " + maxlen);
+                "string: UTF-8 length " + (exact ? "" : "at least ") + length
+                    + " above maxlen " + maxlen);
 
     /// <summary>
     /// The transcoding path for a string the ASCII fast path did not take: not
@@ -1053,7 +1056,7 @@ public sealed class OStream
         }
         if (n > maxlen)
         {
-            throw OverMaxlen(n, maxlen);
+            throw OverMaxlen(n, maxlen, exact: true);
         }
         WriteIdType(id, T_FIXLEN);
         WriteVarint(((ulong)n << 3) | (uint)FixlenType.String);
