@@ -59,7 +59,7 @@ public static class Utf8
     /// <see cref="DecoderFallbackException"/> for bytes that are not valid UTF-8,
     /// encoding raises <see cref="EncoderFallbackException"/> for a UTF-16 value
     /// that is not a valid Unicode string (an unpaired surrogate), which is what
-    /// <see cref="OStream.WriteString"/> needs of it. Valid text goes to exactly
+    /// <see cref="OStream.WriteString(int, string, int)"/> needs of it. Valid text goes to exactly
     /// the same bytes as the default UTF-8 encoder.
     /// </remarks>
     internal static readonly UTF8Encoding Strict =
