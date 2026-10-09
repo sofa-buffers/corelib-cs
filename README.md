@@ -111,6 +111,14 @@ empty sequence can still vanish (MESSAGE_SPEC §2) rather than frame an empty
 `26 07`. Valid strings — embedded `U+0000` included — encode to exactly the bytes
 `Encoding.UTF8` would produce.
 
+`WriteString(id, text, maxlen)` is the same call for a field whose schema declares
+a `maxlen`: generated code passes that literal, and a value whose UTF-8 encoding
+is longer than `maxlen` bytes is refused with `SofabException(SofabError.Argument)`,
+just as atomically. The UTF-8 length of a C# `string` is only known inside the
+transcoder, so the comparison is made there, in the pass that already measures the
+value for its length header — no second pass and no allocation. The library holds
+no bound of its own; the plain `WriteString(id, text)` writes any length.
+
 ### Serialize stream
 
 Give the `OStream` a `FlushSink`, whose `(byte[] data, int offset, int length)`

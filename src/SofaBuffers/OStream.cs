@@ -111,7 +111,7 @@ public sealed class OStream
     private const ulong ContinuationBits = 0x8080_8080_8080_8080UL;
 
     /// <summary>
-    /// Longest string <see cref="WriteString"/> transcodes with its own scalar
+    /// Longest string <see cref="WriteString(int, string, int)"/> transcodes with its own scalar
     /// ASCII loop. Beyond this the runtime's vectorized UTF-8 encoder is faster
     /// than a byte-at-a-time copy, so the general path takes over.
     /// </summary>
@@ -129,7 +129,7 @@ public sealed class OStream
     private readonly FlushSink? _sink;
 
     /// <summary>
-    /// Strict UTF-8 codec used for <see cref="WriteString"/>. Constructed with
+    /// Strict UTF-8 codec used for <see cref="WriteString(int, string, int)"/>. Constructed with
     /// <c>throwOnInvalidBytes: true</c> so that an unencodable <c>string</c> — a
     /// C# UTF-16 value containing an unpaired surrogate — raises an
     /// <see cref="System.Text.EncoderFallbackException"/> instead of the default
@@ -901,7 +901,35 @@ public sealed class OStream
     /// MESSAGE_SPEC §8 the value is refused, never silently rewritten to
     /// <c>U+FFFD</c>. Embedded <c>U+0000</c> is valid UTF-8 and is written verbatim.
     /// </exception>
-    public void WriteString(int id, string text)
+    public void WriteString(int id, string text) => WriteString(id, text, int.MaxValue);
+
+    /// <summary>
+    /// Write a string field whose UTF-8 encoding must not be longer than
+    /// <paramref name="maxlen"/> bytes (raw UTF-8 bytes, no NUL on the wire).
+    /// </summary>
+    /// <remarks>
+    /// The bounded form of <see cref="WriteString(int, string)"/> for a field whose
+    /// schema declares a <c>maxlen</c>. Generated code passes that literal; this
+    /// library holds no limit of its own (CORELIB_PLAN §6.2.1). The UTF-8 length of a
+    /// C# <c>string</c> is only known inside the transcoder, so the comparison lives
+    /// here, in the same measuring pass that sizes the <c>fixlen_word</c>: no second
+    /// pass over the text and no allocation. A UTF-8 encoding is never shorter than
+    /// the UTF-16 code-unit count, so a <c>text.Length</c> already above the bound is
+    /// refused without measuring at all. The one-argument overload forwards
+    /// <see cref="int.MaxValue"/>, which no UTF-8 length an <c>int</c> can report
+    /// exceeds: the comparison is vacuous there, not a default limit.
+    /// </remarks>
+    /// <param name="id">field id</param>
+    /// <param name="text">string value (must be encodable as valid UTF-8)</param>
+    /// <param name="maxlen">the most UTF-8 bytes the value may encode to (&gt;= 0)</param>
+    /// <exception cref="SofabException">
+    /// with <see cref="SofabError.Argument"/> if <paramref name="text"/> cannot be
+    /// encoded as valid UTF-8, if its UTF-8 encoding is longer than
+    /// <paramref name="maxlen"/> bytes, or if <paramref name="maxlen"/> is negative.
+    /// Every refusal is atomic: it happens before any byte, and before any held-back
+    /// sequence header, reaches the buffer.
+    /// </exception>
+    public void WriteString(int id, string text, int maxlen)
     {
         // Encode UTF-8 straight into the output buffer instead of allocating an
         // intermediate byte[] per call: measure once (vectorized), then let the
@@ -913,6 +941,13 @@ public sealed class OStream
         if (text == null)
         {
             throw new ArgumentNullException(nameof(text));
+        }
+        if (text.Length > maxlen)
+        {
+            // Every UTF-16 code unit encodes to at least one UTF-8 byte, so the
+            // value is over the bound before it is measured. Also catches a
+            // negative maxlen.
+            throw OverMaxlen(text.Length, maxlen);
         }
 
         // ASCII fast path. Every char below U+0080 encodes to itself as one byte,
@@ -972,8 +1007,23 @@ public sealed class OStream
             }
         }
 
-        WriteStringTranscoded(id, text);
+        WriteStringTranscoded(id, text, maxlen);
     }
+
+    /// <summary>
+    /// The refusal of <see cref="WriteString(int, string, int)"/> for a value over
+    /// its bound, built out of line so the hot path carries only the throw.
+    /// </summary>
+    /// <param name="length">the UTF-8 length measured (or its lower bound)</param>
+    /// <param name="maxlen">the bound it was measured against</param>
+    /// <returns>the exception to throw</returns>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static SofabException OverMaxlen(int length, int maxlen) =>
+        maxlen < 0
+            ? new SofabException(SofabError.Argument, "string maxlen " + maxlen)
+            : new SofabException(
+                SofabError.Argument,
+                "string: UTF-8 length " + length + " above maxlen " + maxlen);
 
     /// <summary>
     /// The transcoding path for a string the ASCII fast path did not take: not
@@ -981,15 +1031,16 @@ public sealed class OStream
     /// little room left to write it in place.
     /// </summary>
     /// <remarks>
-    /// Split out of <see cref="WriteString"/> so the fast path carries no
+    /// Split out of <see cref="WriteString(int, string, int)"/> so the fast path carries no
     /// exception-handling region: a method containing one is compiled with a
     /// full frame and keeps locals on the stack across it, which every short
     /// ASCII value would otherwise pay for.
     /// </remarks>
     /// <param name="id">field id</param>
     /// <param name="text">string value (must be encodable as valid UTF-8)</param>
+    /// <param name="maxlen">the most UTF-8 bytes the value may encode to</param>
     [MethodImpl(MethodImplOptions.NoInlining)]
-    private void WriteStringTranscoded(int id, string text)
+    private void WriteStringTranscoded(int id, string text, int maxlen)
     {
         int n;
         try
@@ -999,6 +1050,10 @@ public sealed class OStream
         catch (EncoderFallbackException e)
         {
             throw new SofabException(SofabError.Argument, "invalid UTF-8 string: " + e.Message);
+        }
+        if (n > maxlen)
+        {
+            throw OverMaxlen(n, maxlen);
         }
         WriteIdType(id, T_FIXLEN);
         WriteVarint(((ulong)n << 3) | (uint)FixlenType.String);
